@@ -73,12 +73,16 @@ if [ ! -s "$PIN_DIR/${PATCH_NAME}.patch" ]; then
   exit 0
 fi
 
-# Rebuild deterministic state from base (before any local patches)
+# Rebuild deterministic state from base (before any local patches).
+# Save current HEAD so we can restore the clone if patching fails.
+PREV_HEAD=$(git -C "$REPO_DIR" rev-parse HEAD)
 git -C "$REPO_DIR" reset --hard "$PATCH_BASE"
 
 apply_local_patches "$REPO_DIR" "$PIN_DIR" || {
   # Remove the newly-written patch so a retry doesn't hit the same failure
   rm -f "$PIN_DIR/${PATCH_NAME}.patch"
+  # Restore clone to pre-save state so status.sh stays consistent
+  git -C "$REPO_DIR" reset --hard "$PREV_HEAD" 2>/dev/null || true
   echo "Earlier patches may have changed the base. Edit or reorder patches." >&2
   exit 1
 }

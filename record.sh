@@ -59,9 +59,11 @@ resolve_conflict() {
   section { print > (dir "/c" n "_" section) }
   ' "$FILE"
 
-  # Ensure ours/theirs files exist even for empty hunks (edit/delete conflicts)
+  # Ensure hunk files exist even for empty sections (edit/delete conflicts,
+  # empty base in add/add conflicts). Base must exist so Tier 0 can run
+  # all deterministic checks (e.g. sides identical) instead of skipping to LLM.
   for i in $(seq 1 "$COUNT"); do
-    touch "$WORK/c${i}_ours" "$WORK/c${i}_theirs"
+    touch "$WORK/c${i}_ours" "$WORK/c${i}_base" "$WORK/c${i}_theirs"
   done
 
   # Compute content fingerprint for each hunk (deterministic reuse across re-records).
@@ -102,9 +104,6 @@ resolve_conflict() {
   local NEED_LLM=()
   for i in $(seq 1 "$COUNT"); do
     OURS="$WORK/c${i}_ours"; BASE="$WORK/c${i}_base"; THEIRS="$WORK/c${i}_theirs"
-    if [ ! -f "$BASE" ]; then
-      NEED_LLM+=("$i"); continue
-    fi
     if diff -q "$OURS" "$BASE" >/dev/null 2>&1; then
       cp "$THEIRS" "$WORK/r$i"
       echo "  conflict $i: deterministic (take theirs)" >&2
@@ -281,7 +280,7 @@ export _FORKER_WORK_PIN="$WORK_PIN"
 REPO_DIR="$WORK_REPO"
 PIN_DIR="$WORK_PIN"
 
-cleanup_on_error() {
+cleanup_staging() {
   rm -rf "$WORK_DIR"
   [ -n "${OLD_RES_TMP:-}" ] && rm -rf "$OLD_RES_TMP"
   if [ -n "${LOCAL_PATCHES_TMP:-}" ] && [ -d "${LOCAL_PATCHES_TMP:-}" ]; then
@@ -291,7 +290,7 @@ cleanup_on_error() {
     echo "FAILED — previous state is intact" >&2
   fi
 }
-trap cleanup_on_error ERR
+trap cleanup_staging EXIT
 
 git clone --filter=blob:none "$UPSTREAM" "$REPO_DIR"
 
@@ -421,7 +420,7 @@ fi
 
 # --- Atomic swap: move staging area to final location ---
 unset _FORKER_WORK_REPO _FORKER_WORK_PIN
-trap - ERR
+trap - EXIT
 rm -rf "$REAL_REPO" "$REAL_PIN"
 mv "$WORK_REPO" "$REAL_REPO"
 mv "$WORK_PIN" "$REAL_PIN"

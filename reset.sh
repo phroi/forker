@@ -11,3 +11,4 @@ NAME="${1:?Usage: forks/forker/reset.sh <name>}"
 
 bash "$FORKER_DIR/clean.sh" "$NAME"
 rm -rf "$(pin_dir "$NAME")"
+echo "Reset $NAME (clone + pins removed)"
