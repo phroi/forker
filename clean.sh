@@ -11,3 +11,4 @@ NAME="${1:?Usage: forks/forker/clean.sh <name>}"
 
 bash "$FORKER_DIR/status.sh" "$NAME"
 rm -rf "$(repo_dir "$NAME")"
+echo "Cleaned $NAME"

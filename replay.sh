@@ -28,11 +28,11 @@ MANIFEST=$(manifest_file "$PIN_DIR" 2>/dev/null) || {
     echo "$NAME: no pins, shallow-cloning as reference..." >&2
     WORK_DIR=$(mktemp -d "$FORKS_DIR/.work-${NAME}.XXXXXX")
     WORK_REPO="$WORK_DIR/clone"
-    trap 'rm -rf "$WORK_DIR"; echo "FAILED — previous state is intact" >&2' ERR
+    trap 'rm -rf "$WORK_DIR"; echo "FAILED — previous state is intact" >&2' EXIT
     git clone --depth 1 "$UPSTREAM" "$WORK_REPO"
-    trap - ERR
     mv "$WORK_REPO" "$REAL_REPO"
     rm -rf "$WORK_DIR"
+    trap - EXIT
     echo "$NAME: reference clone ready"
     exit 0
   fi
@@ -46,7 +46,7 @@ WORK_REPO="$WORK_DIR/clone"
 export _FORKER_WORK_REPO="$WORK_REPO"
 REPO_DIR="$WORK_REPO"
 
-trap 'rm -rf "$WORK_DIR"; echo "FAILED — previous state is intact" >&2' ERR
+trap 'rm -rf "$WORK_DIR"; echo "FAILED — previous state is intact" >&2' EXIT
 
 # Read base SHA from first line of manifest
 BASE_SHA=$(head -1 "$MANIFEST" | cut -d$'\t' -f1)
@@ -120,7 +120,7 @@ fi
 
 # --- Atomic swap: move staging clone to final location ---
 unset _FORKER_WORK_REPO
-trap - ERR
+trap - EXIT
 mv "$WORK_REPO" "$REAL_REPO"
 rm -rf "$WORK_DIR"
 

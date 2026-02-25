@@ -55,4 +55,11 @@ if ! git -C "$REPO_DIR" diff "$PINNED" --quiet 2>/dev/null \
   exit 1
 fi
 
+# Check for stashed changes that would be lost on wipe
+if [ -n "$(git -C "$REPO_DIR" stash list 2>/dev/null)" ]; then
+  echo "$NAME: clone has stashed changes:"
+  git -C "$REPO_DIR" stash list 2>/dev/null || true
+  exit 1
+fi
+
 echo "$NAME: clone is clean (matches pins)"
