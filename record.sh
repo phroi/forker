@@ -18,8 +18,9 @@ export FORKER_RECORDING=1
 NAME="${1:?Usage: forks/forker/record.sh <name> [ref ...]}"
 shift
 
-REPO_DIR=$(repo_dir "$NAME")
-PIN_DIR=$(pin_dir "$NAME")
+# Real (final) paths — used for guard, local patch preservation, and swap target
+REAL_REPO="$FORKS_DIR/$NAME"
+REAL_PIN="$FORKS_DIR/.pin/$NAME"
 UPSTREAM=$(upstream_url "$NAME")
 
 # Collect refs: CLI args override config.json
@@ -187,24 +188,31 @@ fi
 
 # Preserve local patches before wiping
 LOCAL_PATCHES_TMP=""
-if [ "$(count_glob "$PIN_DIR"/local-*.patch)" -gt 0 ]; then
+if [ "$(count_glob "$REAL_PIN"/local-*.patch)" -gt 0 ]; then
   LOCAL_PATCHES_TMP=$(mktemp -d)
-  cp "$PIN_DIR"/local-*.patch "$LOCAL_PATCHES_TMP/"
+  cp "$REAL_PIN"/local-*.patch "$LOCAL_PATCHES_TMP/"
   echo "Preserved $(count_glob "$LOCAL_PATCHES_TMP"/local-*.patch) local patch(es)"
 fi
 
-# Always start fresh — wipe previous clone and pins
-rm -rf "$REPO_DIR" "$PIN_DIR"
-mkdir -p "$PIN_DIR"
+# Build in a staging area (same filesystem → atomic mv)
+WORK_DIR=$(mktemp -d "$FORKS_DIR/.work-${NAME}.XXXXXX")
+WORK_REPO="$WORK_DIR/clone"
+WORK_PIN="$WORK_DIR/pin"
+mkdir -p "$WORK_PIN"
+
+# Export overrides so subprocesses (patch.sh) target the staging area
+export _FORKER_WORK_REPO="$WORK_REPO"
+export _FORKER_WORK_PIN="$WORK_PIN"
+REPO_DIR="$WORK_REPO"
+PIN_DIR="$WORK_PIN"
 
 cleanup_on_error() {
-  rm -rf "$REPO_DIR" "$PIN_DIR"
+  rm -rf "$WORK_DIR"
   if [ -n "${LOCAL_PATCHES_TMP:-}" ] && [ -d "${LOCAL_PATCHES_TMP:-}" ]; then
-    echo "FAILED — cleaned up clone and .pin/$NAME/" >&2
+    echo "FAILED — previous state is intact" >&2
     echo "Local patches preserved in: $LOCAL_PATCHES_TMP" >&2
-    echo "Restore manually or re-record without local patches." >&2
   else
-    echo "FAILED — cleaned up clone and .pin/$NAME/" >&2
+    echo "FAILED — previous state is intact" >&2
   fi
 }
 trap cleanup_on_error ERR
@@ -328,6 +336,17 @@ FORK_REMOTE=$(fork_url "$NAME" 2>/dev/null) || true
 if [ -n "${FORK_REMOTE:-}" ]; then
   git -C "$REPO_DIR" remote add fork "$FORK_REMOTE"
 fi
+
+# --- Atomic swap: move staging area to final location ---
+unset _FORKER_WORK_REPO _FORKER_WORK_PIN
+trap - ERR
+rm -rf "$REAL_REPO" "$REAL_PIN"
+mv "$WORK_REPO" "$REAL_REPO"
+mv "$WORK_PIN" "$REAL_PIN"
+rm -rf "$WORK_DIR"
+
+REPO_DIR="$REAL_REPO"
+PIN_DIR="$REAL_PIN"
 
 # Regenerate fork workspace entries in pnpm-workspace.yaml
 sync_workspace_yaml

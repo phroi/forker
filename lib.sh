@@ -11,16 +11,28 @@ config_val() {
   jq -r ".[\"$1\"] | $2" "$FORKS_DIR/config.json"
 }
 
-# Get the clone directory path for a fork entry
+# Get the clone directory path for a fork entry.
+# When _FORKER_WORK_REPO is exported (atomic-swap mode in record/replay),
+# returns the staging path so subprocesses like patch.sh target it.
 # Usage: repo_dir <name>
 repo_dir() {
-  echo "$FORKS_DIR/$1"
+  if [ -n "${_FORKER_WORK_REPO:-}" ]; then
+    echo "$_FORKER_WORK_REPO"
+  else
+    echo "$FORKS_DIR/$1"
+  fi
 }
 
-# Get the pin directory path for a fork entry
+# Get the pin directory path for a fork entry.
+# When _FORKER_WORK_PIN is exported (atomic-swap mode in record.sh),
+# returns the staging path.
 # Usage: pin_dir <name>
 pin_dir() {
-  echo "$FORKS_DIR/.pin/$1"
+  if [ -n "${_FORKER_WORK_PIN:-}" ]; then
+    echo "$_FORKER_WORK_PIN"
+  else
+    echo "$FORKS_DIR/.pin/$1"
+  fi
 }
 
 # Get the upstream URL from config

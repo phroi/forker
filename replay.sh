@@ -10,12 +10,12 @@ source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 NAME="${1:?Usage: forks/forker/replay.sh <name>}"
 
-REPO_DIR=$(repo_dir "$NAME")
-PIN_DIR=$(pin_dir "$NAME")
+REAL_REPO="$FORKS_DIR/$NAME"
+PIN_DIR=$(pin_dir "$NAME")   # pins are read-only input, no override needed
 UPSTREAM=$(upstream_url "$NAME")
 
 # Skip if already cloned
-if [ -d "$REPO_DIR" ]; then
+if [ -d "$REAL_REPO" ]; then
   echo "$NAME: clone already exists, skipping (remove it to redo setup)" >&2
   exit 0
 fi
@@ -26,7 +26,13 @@ MANIFEST=$(manifest_file "$PIN_DIR" 2>/dev/null) || {
   mapfile -t REFS < <(repo_refs "$NAME" 2>/dev/null || true)
   if [ ${#REFS[@]} -eq 0 ]; then
     echo "$NAME: no pins, shallow-cloning as reference..." >&2
-    git clone --depth 1 "$UPSTREAM" "$REPO_DIR"
+    WORK_DIR=$(mktemp -d "$FORKS_DIR/.work-${NAME}.XXXXXX")
+    WORK_REPO="$WORK_DIR/clone"
+    trap 'rm -rf "$WORK_DIR"; echo "FAILED — previous state is intact" >&2' ERR
+    git clone --depth 1 "$UPSTREAM" "$WORK_REPO"
+    trap - ERR
+    mv "$WORK_REPO" "$REAL_REPO"
+    rm -rf "$WORK_DIR"
     echo "$NAME: reference clone ready"
     exit 0
   fi
@@ -34,7 +40,13 @@ MANIFEST=$(manifest_file "$PIN_DIR" 2>/dev/null) || {
   exit 0
 }
 
-trap 'rm -rf "$REPO_DIR"; echo "FAILED — cleaned up $NAME clone" >&2' ERR
+# Build clone in staging area (same filesystem → atomic mv)
+WORK_DIR=$(mktemp -d "$FORKS_DIR/.work-${NAME}.XXXXXX")
+WORK_REPO="$WORK_DIR/clone"
+export _FORKER_WORK_REPO="$WORK_REPO"
+REPO_DIR="$WORK_REPO"
+
+trap 'rm -rf "$WORK_DIR"; echo "FAILED — previous state is intact" >&2' ERR
 
 # Read base SHA from first line of manifest
 BASE_SHA=$(head -1 "$MANIFEST" | cut -d$'\t' -f1)
@@ -105,5 +117,11 @@ FORK_REMOTE=$(fork_url "$NAME" 2>/dev/null) || true
 if [ -n "${FORK_REMOTE:-}" ]; then
   git -C "$REPO_DIR" remote add fork "$FORK_REMOTE"
 fi
+
+# --- Atomic swap: move staging clone to final location ---
+unset _FORKER_WORK_REPO
+trap - ERR
+mv "$WORK_REPO" "$REAL_REPO"
+rm -rf "$WORK_DIR"
 
 echo "OK — replay HEAD matches pinned HEAD ($EXPECTED)"
