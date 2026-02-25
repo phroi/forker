@@ -4,7 +4,7 @@ Deterministic record/replay for external repo forks.
 
 Named after what it does: forker manages forked repositories — cloning, merging refs, resolving conflicts, and producing deterministic builds.
 
-All fork entries are defined in `forks/config.json`. Scripts accept an entry name (e.g., `ccc`) as their first argument.
+All fork entries are defined in `forks/config.json`. Scripts accept an entry name (e.g., `ccc`) as their first argument. Forker is typically installed as a fork entry itself — use `save.sh forker` to persist tool changes as local patches.
 
 ## Directory structure
 
@@ -132,7 +132,7 @@ Example:
 3. Push the PR branch: `cd forks/ccc && git push fork <pr-branch>:<remote-branch>`
 4. Add the PR number to `refs` in `forks/config.json` — order PRs by target branch from upstream to downstream, so each group merges cleanly onto its base before the next layer begins
 5. `bash forks/forker/record.sh ccc` and `pnpm check:full` to verify
-6. Don't open upstream PRs prematurely — keep changes on the fork until production-ready
+6. Don't open upstream PRs prematurely — keep changes on the fork until production-ready and the maintainer decides to upstream
 
 ## Switching modes
 
