@@ -1,65 +1,99 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Check whether a fork clone is safe to wipe.
-#   Exit 0 → safe (not cloned, or matches pins exactly)
-#   Exit 1 → has custom work (any changes vs pinned commit, diverged HEAD, or no pins to compare)
-# Usage: forks/forker/status.sh <name>
+# Exit 0 only when an entry is safe to wipe and rebuild. Managed entries must
+# match their saved pin series; reference entries must match their remote tip.
 
-# shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-NAME="${1:?Usage: forks/forker/status.sh <name>}"
+NAME="${1:?Usage: $TOOL_REL/status.sh <name>}"
 
 REPO_DIR=$(repo_dir "$NAME")
 PIN_DIR=$(pin_dir "$NAME")
+MODE=$(entry_mode "$NAME")
 
-if [ ! -d "$REPO_DIR" ]; then
+if [ ! -d "$REPO_DIR/.git" ]; then
   echo "$NAME: clone is not present"
   exit 0
 fi
 
-PINNED=$(pinned_head "$PIN_DIR" 2>/dev/null) || {
-  # No HEAD pin — distinguish reference-only vs bootstrapped entries.
-  # Reference-only (empty refs, no local patches) are always safe to wipe.
-  # Bootstrapped entries (empty refs but HAS local patches, e.g. forker) are not.
-  mapfile -t _refs < <(repo_refs "$NAME" 2>/dev/null || true)
-  if [ ${#_refs[@]} -eq 0 ] && [ "$(count_glob "$PIN_DIR"/local-*.patch)" -eq 0 ]; then
-    echo "$NAME: reference clone (safe to wipe)"
-    exit 0
+if [ "$MODE" = "managed" ]; then
+  if PINNED=$(pinned_head "$PIN_DIR" 2>/dev/null); then
+    if has_legacy_local_patches "$PIN_DIR"; then
+      echo "$NAME: pins use an unsupported legacy local patch layout"
+      exit 1
+    fi
+
+    LOCAL_BASE=$(local_base "$PIN_DIR" 2>/dev/null) || {
+      echo "$NAME: pins are missing LOCAL_BASE"
+      exit 1
+    }
+
+    ACTUAL=$(repo_head "$REPO_DIR")
+
+    # Managed cleanliness means three things at once: no worktree changes, a
+    # linear LOCAL_BASE..HEAD range, and a saved commit series that still
+    # matches the pin contents.
+    if repo_has_worktree_changes "$REPO_DIR"; then
+      echo "$NAME: clone has changes relative to pins:"
+      show_repo_worktree_changes "$REPO_DIR"
+      exit 1
+    fi
+
+    if ! git -C "$REPO_DIR" merge-base --is-ancestor "$LOCAL_BASE" "$ACTUAL" >/dev/null 2>&1; then
+      echo "$NAME: HEAD is not based on pinned LOCAL_BASE:"
+      echo "  local_base  $LOCAL_BASE"
+      echo "  actual      $ACTUAL"
+      exit 1
+    fi
+
+    if commit_range_has_merges "$REPO_DIR" "$LOCAL_BASE" "$ACTUAL"; then
+      echo "$NAME: local series contains merge commits after LOCAL_BASE"
+      exit 1
+    fi
+
+    if saved_series_matches_ref "$REPO_DIR" "$PIN_DIR" "$ACTUAL"; then
+      if [ "$ACTUAL" = "$PINNED" ]; then
+        echo "$NAME: clone is clean (matches pins)"
+      else
+        echo "$NAME: clone is clean (saved series matches pins)"
+      fi
+      exit 0
+    fi
+
+    echo "$NAME: commit series diverged from pins:"
+    echo "  local_base  $LOCAL_BASE"
+    echo "  pinned      $PINNED"
+    echo "  actual      $ACTUAL"
+    git -C "$REPO_DIR" log --oneline "$LOCAL_BASE..$ACTUAL" 2>/dev/null || true
+    exit 1
   fi
-  echo "$NAME: clone exists but no pins — custom clone"
+fi
+
+BASELINE_REF=$(reference_baseline_ref "$REPO_DIR" 2>/dev/null) || {
+  echo "$NAME: clone has no remote baseline"
   exit 1
 }
 
-ACTUAL=$(git -C "$REPO_DIR" rev-parse HEAD)
+BASELINE_SHA=$(local_origin_head_sha "$REPO_DIR")
+ACTUAL=$(repo_head "$REPO_DIR")
 
-if [ "$ACTUAL" != "$PINNED" ]; then
-  echo "$NAME: HEAD diverged from pinned HEAD:"
-  echo "  pinned  $PINNED"
-  echo "  actual  $ACTUAL"
-  git -C "$REPO_DIR" log --oneline "$PINNED..$ACTUAL" 2>/dev/null || true
+if [ "$ACTUAL" != "$BASELINE_SHA" ]; then
+  echo "$NAME: HEAD diverged from $BASELINE_REF:"
+  echo "  baseline  $BASELINE_SHA"
+  echo "  actual    $ACTUAL"
+  git -C "$REPO_DIR" log --oneline "$BASELINE_SHA..$ACTUAL" 2>/dev/null || true
   exit 1
 fi
 
-# Compare pinned commit against working tree AND index.
-# git diff <commit> catches unstaged changes; --cached catches staged-only changes
-# (e.g. staged edits where the working tree was reverted).
-if ! git -C "$REPO_DIR" diff "$PINNED" --quiet 2>/dev/null \
-   || ! git -C "$REPO_DIR" diff --cached "$PINNED" --quiet 2>/dev/null \
-   || [ -n "$(git -C "$REPO_DIR" ls-files --others --exclude-standard 2>/dev/null)" ]; then
-  echo "$NAME: clone has changes relative to pins:"
-  git -C "$REPO_DIR" diff "$PINNED" --stat 2>/dev/null || true
-  git -C "$REPO_DIR" diff --cached "$PINNED" --stat 2>/dev/null || true
-  git -C "$REPO_DIR" ls-files --others --exclude-standard 2>/dev/null || true
+if repo_has_worktree_changes "$REPO_DIR"; then
+  echo "$NAME: clone has changes relative to $BASELINE_REF:"
+  show_repo_worktree_changes "$REPO_DIR" "$BASELINE_REF"
   exit 1
 fi
 
-# Check for stashed changes that would be lost on wipe
-if [ -n "$(git -C "$REPO_DIR" stash list 2>/dev/null)" ]; then
-  echo "$NAME: clone has stashed changes:"
-  git -C "$REPO_DIR" stash list 2>/dev/null || true
-  exit 1
+if [ "$MODE" = "managed" ]; then
+  echo "$NAME: clone is clean (managed entry without pins yet)"
+else
+  echo "$NAME: clone is clean (matches $BASELINE_REF)"
 fi
-
-echo "$NAME: clone is clean (matches pins)"

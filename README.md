@@ -1,154 +1,152 @@
 # Forker
 
-Deterministic record/replay for external repo forks.
+Deterministic fork management for external repositories.
 
-Named after what it does: forker manages forked repositories — cloning, merging refs, resolving conflicts, and producing deterministic builds.
+Forker manages two entry modes from `forks/config.json`:
 
-All fork entries are defined in `forks/config.json`. Scripts accept an entry name (e.g., `ccc`) as their first argument. Forker is typically installed as a fork entry itself — use `save.sh forker` to persist tool changes as local patches.
+- `managed`: replayable forks stored in `forks/.pin/<name>/`
+- `reference`: shallow clones kept current with `update.sh`
 
-## Directory structure
-
-```
-forks/
-├── .gitignore           # track only .pin/ and config.json
-├── .pin/                # computed state per entry (committed)
-│   └── ccc/
-│       ├── HEAD
-│       ├── manifest
-│       ├── res-2.resolution
-│       └── local-001-*.patch
-├── config.json          # unified config, entries keyed by name
-├── forker/              # fork management tool (bootstrapped on install)
-├── ccc/                 # gitignored clone
-├── contracts/           # gitignored clone (reference)
-└── whitepaper/          # gitignored clone (reference)
-```
-
-## config.json
+## Config
 
 ```json
 {
-  "ccc": {
+  "ckb-devrel_ccc": {
     "upstream": "https://github.com/org/repo.git",
     "fork": "git@github.com:you/repo.git",
-    "refs": ["42", "feature-branch", "releases/next"],
-    "workspace": {
-      "include": ["packages/*"],
-      "exclude": ["packages/demo"]
-    }
+    "mode": "managed",
+    "refs": ["42", "feature-branch"]
   },
-  "contracts": {
-    "upstream": "https://github.com/org/contracts.git",
-    "refs": []
+  "nervosnetwork_ckb": {
+    "upstream": "https://github.com/org/other-repo.git",
+    "mode": "reference"
   }
 }
 ```
 
-- **upstream**: Git URL to clone from
-- **fork**: SSH URL of developer fork, added as `fork` remote after replay
-- **refs**: Merge refs — PR numbers, branch names, or commit SHAs (auto-detected). Empty = reference-only (shallow clone)
-- **workspace**: Glob patterns for pnpm workspace inclusion/exclusion
+- `upstream`: clone source
+- `fork`: optional push remote for `push.sh`
+- `mode`: `managed` or `reference`
+- `refs`: optional managed merge refs; empty means bootstrap from upstream HEAD
 
-## .pin/ format
+## Managed Pins
 
+Managed state lives in `forks/.pin/<name>/`.
+
+```text
+forks/.pin/ckb-devrel_ccc/
+  HEAD
+  LOCAL_BASE
+  manifest
+  res-2.resolution
+  series/
+    0001.patch
+    0002.patch
 ```
-forks/.pin/ccc/
-  HEAD              # expected SHA after full replay
-  manifest          # base SHA + merge refs (TSV, one per line)
-  res-2.resolution  # conflict resolution for merge step 2 (gaps = no conflicts)
-  local-001.patch   # local development patch
-```
 
-- **HEAD**: expected final SHA after everything (merges, patch.sh, local patches). Verified at end of replay
-- **manifest**: TSV, one line per ref. Line 1 is the base commit; subsequent lines are merge refs applied sequentially onto `wip`
-- **res-N.resolution**: counted conflict resolution for merge step N. Positional format with `CONFLICT ours=N base=M theirs=K resolution=R` headers — parser reads counts and skips lines, never inspects content. Human-readable and editable: you can inspect what was resolved, edit by hand, or diff across re-records
-- **local-\*.patch**: standard unified diffs, applied in lexicographic order after merges + patch.sh, each as a deterministic commit
+- `manifest`: base commit plus merged refs
+- `LOCAL_BASE`: replayed tip after merges, before saved local commits
+- `series/*.patch`: saved local commit series from `git format-patch`
+- `HEAD`: deterministic replayed tip after `git am`
+- `res-N.resolution`: counted merge conflict resolutions
 
-## How it works
+## Core Commands
 
-1. **Auto-replay** — `.pnpmfile.cjs` runs at `pnpm install` time. If `.pin/<name>/manifest` exists but the clone doesn't, it auto-triggers `forks/forker/replay.sh` to rebuild from pins. Reference-only entries (no pins, empty refs) are shallow-cloned instead
-
-2. **Workspace override** — `.pnpmfile.cjs` scans `forks/config.json` and rewrites matching dependencies to `workspace:*` when clones exist. This is necessary because `catalog:` specifiers resolve to a semver range _before_ pnpm considers workspace linking — even with `link-workspace-packages = true`, pnpm fetches from the registry without this hook. When no clone exists, the hook is a no-op and deps resolve from the registry normally
-
-3. **Source-level types** — `patch.sh` rewrites fork package exports to point at `.ts` source instead of `.d.ts`, then creates a deterministic git commit (fixed author/date). This gives real-time type feedback — changes in fork source are immediately visible to stack packages without rebuilding. It also ensures record and replay produce the same HEAD hash
-
-4. **Diagnostic filtering** — `tsgo-filter.sh` (at repo root) wraps `tsgo` and suppresses diagnostics originating from fork clone paths. Fork source may not satisfy the stack's strict tsconfig (`verbatimModuleSyntax`, `noImplicitOverride`, `noUncheckedIndexedAccess`), so the wrapper only fails on diagnostics from stack source. When no forks are cloned, packages fall back to plain `tsgo`
-
-5. **Pending work safety** — `bash forks/forker/status.sh <name>` checks for uncommitted/unpushed work (exit 0 = safe to wipe, exit 1 = has work). The `record`, `clean`, and `reset` scripts guard against data loss automatically
-
-## Recording
+Reference entries:
 
 ```bash
-bash forks/forker/record.sh ccc          # refs from config.json
-bash forks/forker/record.sh ccc 42 main  # override refs on CLI
+bash forks/phroi_forker/update.sh nervosnetwork_ckb
+bash forks/phroi_forker/update-all.sh
 ```
 
-Clones upstream, merges configured refs, resolves conflicts, runs patch.sh, applies local patches, writes .pin/. Commit the resulting `.pin/` directory so other contributors get the same build.
+- bootstrap or refresh shallow reference clones
+- skip dirty clones instead of overwriting them
 
-`record.sh` also regenerates the fork workspace entries in `pnpm-workspace.yaml` (between `@generated` markers) — manual edits to that section are overwritten on re-record.
-
-### Ref auto-detection
-
-Refs are auto-detected by pattern:
-
-- `^[0-9a-f]{7,40}$` → commit SHA
-- `^[0-9]+$` → GitHub PR number (fetched as `pull/N/head`)
-- everything else → branch name
-
-### Conflict resolution
-
-Recording uses a tiered approach:
-
-- **Tier 0**: Deterministic — one side matches base → take the other (zero tokens)
-- **Tier 1**: Strategy classification — AI picks OURS/THEIRS/BOTH/GENERATE (~5 tokens per conflict)
-- **Tier 2**: Code generation — AI generates merged code (hunks only, for GENERATE conflicts)
-
-Resolutions are stored as counted resolution files in `.pin/<name>/res-N.resolution`.
-
-## Developing in a fork
-
-Work directly in `forks/<name>/` on the `wip` branch.
-
-### Saving local patches
+Managed entries:
 
 ```bash
-bash forks/forker/save.sh ccc [description]
+bash forks/phroi_forker/record.sh ckb-devrel_ccc
+bash forks/phroi_forker/replay.sh ckb-devrel_ccc
+bash forks/phroi_forker/save.sh ckb-devrel_ccc
+bash forks/phroi_forker/push.sh ckb-devrel_ccc pr-123
 ```
 
-Captures all changes (committed + uncommitted) relative to the pinned HEAD as a patch in `.pin/<name>/`. Patches survive re-records and replays.
+- `record.sh`: rebuild pins from upstream plus configured refs
+- `replay.sh`: rebuild a missing managed clone from pins, using the recorded merge SHAs after fetching the configured refs
+- `save.sh`: save the committed range from `LOCAL_BASE..wip` as `series/*.patch`
+- `push.sh`: cherry-pick the saved `wip` series onto a target branch
 
-Example:
+## Save Workflow
 
-1. Edit files in `forks/ccc/`
-2. `bash forks/forker/save.sh ccc my-feature` → creates `.pin/ccc/local-001-my-feature.patch`
-3. Edit more files
-4. `bash forks/forker/save.sh ccc another-fix` → creates `.pin/ccc/local-002-another-fix.patch`
-5. `bash forks/forker/clean.sh ccc && pnpm install` → replays merges + patches, HEAD matches
+`save.sh` is commit-series based.
 
-### Upstream contribution workflow
+- requires a clean worktree
+- requires `wip` for already pinned entries
+- saves committed history only; uncommitted work must be committed or stashed first
+- requires a linear local series after `LOCAL_BASE`; merge commits are not allowed there
+- rewrites the whole saved series each time
+- bootstrap save for an unpinned managed clone derives the managed base with `record.sh`, then stores commits on top of that base
+- bootstrap save only works when the live clone is already based on that derived managed base; otherwise record first
 
-1. Develop and test on `wip`. Only push to the fork remote when changes are validated against the stack
-2. `bash forks/forker/push.sh ccc` — cherry-picks your commits onto the PR branch
-3. Push the PR branch: `cd forks/ccc && git push fork <pr-branch>:<remote-branch>`
-4. Add the PR number to `refs` in `forks/config.json` — order PRs by target branch from upstream to downstream, so each group merges cleanly onto its base before the next layer begins
-5. `bash forks/forker/record.sh ccc` and `pnpm check:full` to verify
-6. Don't open upstream PRs prematurely — keep changes on the fork until production-ready and the maintainer decides to upstream
+After `save.sh`, the live clone is still your live branch state. If you want the canonical replayed `wip`, clean and replay.
 
-## Switching modes
+## Push Workflow
 
-| Mode                                      | Command                                                    |
-| ----------------------------------------- | ---------------------------------------------------------- |
-| Check for pending work                    | `bash forks/forker/status.sh ccc` (exit 0 = clean)         |
-| Local fork (default when .pin/ committed) | `pnpm install` auto-replays                                |
-| Published packages                        | `bash forks/forker/reset.sh ccc && pnpm install`           |
-| Re-record from scratch                    | `bash forks/forker/record.sh ccc` (aborts if pending work) |
-| Force re-replay                           | `bash forks/forker/clean.sh ccc && pnpm install`           |
+`push.sh` requires:
+
+- a clean `wip` branch
+- a live commit series that matches the saved pin series
+- a linear local series after `LOCAL_BASE`
+- a target branch that already exists locally, or as `origin/<target>` or `fork/<target>`
+- if the target branch already contains a prefix of the saved series, `push.sh` only cherry-picks the missing suffix
+
+If the target is omitted, `push.sh` uses the most recently updated local `pr-*` branch.
+
+## Pin Preflight
+
+```bash
+bash forks/phroi_forker/verify-pins.sh ckb-devrel_ccc
+bash forks/phroi_forker/verify-pins-all.sh
+```
+
+- `verify-pins.sh`: dry-run replay for one managed entry without touching the live clone
+- `verify-pins-all.sh`: run the same dry-run across all managed entries and print a summary
+
+## Safety Commands
+
+```bash
+bash forks/phroi_forker/status.sh ckb-devrel_ccc
+bash forks/phroi_forker/status-all.sh
+bash forks/phroi_forker/clean.sh ckb-devrel_ccc
+bash forks/phroi_forker/replay-all.sh
+bash forks/phroi_forker/reset.sh ckb-devrel_ccc
+bash forks/phroi_forker/doctor.sh
+```
+
+- `status.sh`: safe-to-wipe check for one entry
+- `status-all.sh`: same for all configured entries
+- `clean.sh`: remove a safe clone
+- `replay-all.sh`: replay missing managed clones, skip safe existing ones, continue past failures
+- `reset.sh`: managed-only full reset of clone plus pins
+- `doctor.sh`: read-only validation of tools, config, pin shape, and clone state
+
+## Conflict Resolution
+
+Managed recording resolves merge conflicts in this order:
+
+1. deterministic reuse when one side matches base or both sides match
+2. reuse of previously recorded resolutions when fingerprints still match
+3. coworker classification for simple keep/concat choices
+4. coworker generation only for conflicts that still need a custom merge
+
+Replay uses recorded `res-N.resolution` data and does not need the assistant.
+Replaying a managed fork still depends on the recorded merge SHAs remaining available from upstream after fetching their named refs. If a recorded SHA is no longer fetchable, re-record.
 
 ## Requirements
 
-- **Recording** (`record.sh`): AI Coworker CLI (`pnpm coworker:ask`) for conflict resolution + `jq`
-- **Replay** (`pnpm install`): `jq` only — works for any contributor with just pnpm
+- `git`, `jq`
+- `pnpm coworker:ask` for conflicted `record.sh`, and for bootstrap `save.sh` when deriving a managed base that hits conflicts
 
-## Licensing
+## Scope
 
-This source code, crafted with care by [Phroi](https://phroi.com/), is freely available on [GitHub](https://github.com/phroi/forker/) and it is released under the [MIT License](./LICENSE).
+This checkout documents only core forker behavior.

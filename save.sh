@@ -1,93 +1,161 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: forks/forker/save.sh <name> [description]
-#   Captures local work in the fork clone as a patch file in .pin/<name>/.
-#   description: short label for the patch (default: "local")
+# Save the committed local work above LOCAL_BASE as a full format-patch series.
+# This intentionally ignores unstaged history and rewrites the full saved series.
 
-# shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-NAME="${1:?Usage: forks/forker/save.sh <name> [description]}"
-shift
+NAME="${1:?Usage: $TOOL_REL/save.sh <name>}"
+
+MODE=$(entry_mode "$NAME")
+if [ "$MODE" != "managed" ]; then
+  echo "ERROR: $NAME is a reference entry. Managed pins are required to save a commit series." >&2
+  exit 1
+fi
 
 REPO_DIR=$(repo_dir "$NAME")
 PIN_DIR=$(pin_dir "$NAME")
+BOOTSTRAP=0
+BOOTSTRAP_REPO=""
+BOOTSTRAP_PIN=""
 
-DESCRIPTION="${1:-local}"
-# Sanitize description for use in filename (fallback if nothing alphanumeric remains)
-DESCRIPTION=$(printf '%s' "$DESCRIPTION" | tr -c '[:alnum:]-_' '-' | sed 's/--*/-/g; s/^-//; s/-$//')
-[ -z "$DESCRIPTION" ] && DESCRIPTION="local"
-
-# Check prerequisites
-if [ ! -d "$REPO_DIR" ]; then
-  echo "ERROR: $NAME clone does not exist. Run 'bash forks/forker/record.sh $NAME' first." >&2
+if [ ! -d "$REPO_DIR/.git" ]; then
+  echo "ERROR: $NAME clone does not exist. Run 'bash $TOOL_REL/record.sh $NAME' first." >&2
   exit 1
 fi
 
-PINNED_HEAD=$(pinned_head "$PIN_DIR" 2>/dev/null) || {
-  echo "ERROR: No pins found. Run 'bash forks/forker/record.sh $NAME' first." >&2
+if repo_has_worktree_changes "$REPO_DIR"; then
+  echo "ERROR: save.sh now records committed history only. Commit or stash local changes first." >&2
+  show_repo_worktree_changes "$REPO_DIR"
   exit 1
-}
+fi
 
 CURRENT_BRANCH=$(git -C "$REPO_DIR" branch --show-current)
-if [ "$CURRENT_BRANCH" != "wip" ]; then
-  echo "ERROR: Expected to be on 'wip' branch, but on '$CURRENT_BRANCH'." >&2
-  exit 1
-fi
 
-# Check for changes (committed + uncommitted + staged + untracked) relative to pinned HEAD
-if git -C "$REPO_DIR" diff "$PINNED_HEAD" --quiet 2>/dev/null \
-   && git -C "$REPO_DIR" diff --cached "$PINNED_HEAD" --quiet 2>/dev/null \
-   && [ -z "$(git -C "$REPO_DIR" ls-files --others --exclude-standard 2>/dev/null)" ]; then
-  echo "No changes to save (working tree matches pinned HEAD)."
-  exit 0
-fi
+WORK_DIR=$(mktemp -d)
+TMP_REPO="$WORK_DIR/repo"
+TMP_PIN="$WORK_DIR/pin"
+TMP_SERIES="$WORK_DIR/series"
+trap 'rm -rf "$WORK_DIR"' EXIT
 
-# Count existing local patches to find the pre-local-patches base state.
-# Local patches are linear commits on top of post-patch.sh, so PINNED_HEAD~N
-# gives us the base before any local patches were applied.
-EXISTING=$(count_glob "$PIN_DIR"/local-*.patch)
-if [ "$EXISTING" -gt 0 ]; then
-  PATCH_BASE=$(git -C "$REPO_DIR" rev-parse "${PINNED_HEAD}~${EXISTING}" 2>/dev/null) || {
-    echo "ERROR: Cannot compute base state. Pins may be corrupted." >&2
-    echo "Re-record with:  bash forks/forker/record.sh $NAME" >&2
+mkdir -p "$TMP_PIN"
+
+if PINNED_HEAD=$(pinned_head "$PIN_DIR" 2>/dev/null); then
+  if [ "$CURRENT_BRANCH" != "wip" ]; then
+    echo "ERROR: Expected to be on 'wip' branch, but on '$CURRENT_BRANCH'." >&2
+    exit 1
+  fi
+
+  if has_legacy_local_patches "$PIN_DIR"; then
+    echo "ERROR: $NAME still uses an unsupported legacy local patch layout. Delete and regenerate its pins first." >&2
+    exit 1
+  fi
+
+  BASE_COMMIT=$(local_base "$PIN_DIR") || {
+    echo "ERROR: $NAME pins are missing LOCAL_BASE." >&2
     exit 1
   }
+
+  if ! git -C "$REPO_DIR" merge-base --is-ancestor "$BASE_COMMIT" HEAD >/dev/null 2>&1; then
+    echo "ERROR: wip is not based on the pinned LOCAL_BASE." >&2
+    echo "Use 'bash $TOOL_REL/clean.sh $NAME' and then 'bash $TOOL_REL/replay.sh $NAME' before saving again." >&2
+    exit 1
+  fi
+
+  if commit_range_has_merges "$REPO_DIR" "$BASE_COMMIT" HEAD; then
+    echo "ERROR: save.sh requires a linear local series after LOCAL_BASE. Cherry-pick merges into plain commits first." >&2
+    exit 1
+  fi
+
+  if saved_series_matches_ref "$REPO_DIR" "$PIN_DIR" HEAD; then
+    echo "No changes to save (commit series already matches pins)."
+    exit 0
+  fi
+
+  cp -a "$PIN_DIR"/. "$TMP_PIN/"
 else
-  PATCH_BASE="$PINNED_HEAD"
+  BOOTSTRAP=1
+  BOOTSTRAP_ROOT="$WORK_DIR/bootstrap"
+  BOOTSTRAP_FORKS="$BOOTSTRAP_ROOT/forks"
+  BOOTSTRAP_TOOL="$BOOTSTRAP_FORKS/.forker-tool"
+  BOOTSTRAP_LOG="$WORK_DIR/bootstrap-record.log"
+
+  # Bootstrap save derives the managed base in isolation first, then checks
+  # that the live clone history is already built on top of that same base.
+  mkdir -p "$BOOTSTRAP_TOOL"
+  cp -a "$FORKER_DIR"/. "$BOOTSTRAP_TOOL/"
+  rm -rf "$BOOTSTRAP_TOOL/.git"
+  cp "$FORKS_DIR/config.json" "$BOOTSTRAP_FORKS/config.json"
+
+  if ! env -u _FORKER_WORK_REPO -u _FORKER_WORK_PIN FORKER_PACKAGE_ROOT="$ROOT_DIR" bash "$BOOTSTRAP_TOOL/record.sh" "$NAME" >"$BOOTSTRAP_LOG" 2>&1; then
+    cat "$BOOTSTRAP_LOG" >&2
+    echo "ERROR: bootstrap save could not derive the managed base." >&2
+    exit 1
+  fi
+
+  BOOTSTRAP_REPO="$BOOTSTRAP_FORKS/$NAME"
+  BOOTSTRAP_PIN="$BOOTSTRAP_FORKS/.pin/$NAME"
+  BASE_COMMIT=$(local_base "$BOOTSTRAP_PIN") || {
+    echo "ERROR: bootstrap record did not produce LOCAL_BASE." >&2
+    exit 1
+  }
+
+  if ! git -C "$REPO_DIR" fetch --quiet "$BOOTSTRAP_REPO" "$BASE_COMMIT"; then
+    echo "ERROR: could not compare the live clone against the derived managed base." >&2
+    exit 1
+  fi
+
+  if ! git -C "$REPO_DIR" merge-base --is-ancestor FETCH_HEAD HEAD >/dev/null 2>&1; then
+    echo "ERROR: live clone is not based on the config-derived managed base." >&2
+    echo "Run 'bash $TOOL_REL/record.sh $NAME' first, then make commits on wip before saving." >&2
+    exit 1
+  fi
+
+  if commit_range_has_merges "$REPO_DIR" "$BASE_COMMIT" HEAD; then
+    echo "ERROR: save.sh requires a linear local series after the derived managed base. Cherry-pick merges into plain commits first." >&2
+    exit 1
+  fi
+
+  cp -a "$BOOTSTRAP_PIN"/. "$TMP_PIN/"
 fi
 
-NEXT_NUM=$(printf '%03d' $((EXISTING + 1)))
-PATCH_NAME="local-${NEXT_NUM}-${DESCRIPTION}"
+remove_saved_series "$TMP_PIN"
+# Save always rewrites the whole LOCAL_BASE..HEAD series so pins describe the
+# exact current local branch history instead of an append-only delta stack.
+export_commit_series "$REPO_DIR" "$BASE_COMMIT" HEAD "$TMP_SERIES"
 
-# Stage everything so untracked files are included in the diff
-git -C "$REPO_DIR" add -A
-# Generate patch: incremental changes relative to pinned HEAD (not base)
-git -C "$REPO_DIR" diff --cached "$PINNED_HEAD" > "$PIN_DIR/${PATCH_NAME}.patch"
+SERIES_COUNT=$(count_glob "$TMP_SERIES"/*.patch)
 
-# Verify patch is non-empty
-if [ ! -s "$PIN_DIR/${PATCH_NAME}.patch" ]; then
-  rm -f "$PIN_DIR/${PATCH_NAME}.patch"
-  echo "No diff to save."
-  exit 0
+if [ "$BOOTSTRAP" -eq 0 ]; then
+  git clone --quiet "$REPO_DIR" "$TMP_REPO"
+  git -C "$TMP_REPO" checkout "$BASE_COMMIT" >/dev/null 2>&1
+  git -C "$TMP_REPO" checkout -B wip >/dev/null 2>&1
+else
+  TMP_REPO="$BOOTSTRAP_REPO"
 fi
 
-# Rebuild deterministic state from base (before any local patches).
-# Save current HEAD so we can restore the clone if patching fails.
-PREV_HEAD=$(git -C "$REPO_DIR" rev-parse HEAD)
-git -C "$REPO_DIR" reset --hard "$PATCH_BASE"
+write_local_base "$TMP_PIN" "$BASE_COMMIT"
+if [ "$SERIES_COUNT" -gt 0 ]; then
+  mkdir -p "$(series_dir "$TMP_PIN")"
+  cp "$TMP_SERIES"/*.patch "$(series_dir "$TMP_PIN")/"
+fi
 
-apply_local_patches "$REPO_DIR" "$PIN_DIR" || {
-  # Remove the newly-written patch so a retry doesn't hit the same failure
-  rm -f "$PIN_DIR/${PATCH_NAME}.patch"
-  # Restore clone to pre-save state so status.sh stays consistent
-  git -C "$REPO_DIR" reset --hard "$PREV_HEAD" 2>/dev/null || true
-  echo "Earlier patches may have changed the base. Edit or reorder patches." >&2
-  exit 1
-}
+apply_saved_series "$TMP_REPO" "$TMP_PIN"
 
-# Update HEAD
-git -C "$REPO_DIR" rev-parse HEAD > "$PIN_DIR/HEAD"
+NEW_HEAD=$(git -C "$TMP_REPO" rev-parse HEAD)
 
-echo "Saved ${PATCH_NAME}.patch. Commit .pin/$NAME/ to share."
+rm -rf "$PIN_DIR"
+mkdir -p "$PIN_DIR"
+cp -a "$TMP_PIN"/. "$PIN_DIR/"
+printf '%s\n' "$NEW_HEAD" > "$PIN_DIR/HEAD"
+
+if [ "$BOOTSTRAP" -eq 1 ] && [ "$SERIES_COUNT" -eq 0 ]; then
+  echo "Bootstrapped pins (no local commits to save). Commit .pin/$NAME/ to share."
+elif [ "$BOOTSTRAP" -eq 1 ]; then
+  echo "Bootstrapped pins and saved $SERIES_COUNT commit(s) in .pin/$NAME/series/. Commit .pin/$NAME/ to share."
+elif [ "$SERIES_COUNT" -eq 0 ]; then
+  echo "Saved an empty local series. Commit .pin/$NAME/ to share."
+else
+  echo "Saved $SERIES_COUNT commit(s) in .pin/$NAME/series/. Commit .pin/$NAME/ to share."
+fi
