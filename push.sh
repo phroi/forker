@@ -3,7 +3,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-NAME="${1:?Usage: forks/forker/push.sh <name> [target-branch]}"
+NAME="${1:?Usage: $TOOL_REL/push.sh <name> [target-branch]}"
 shift
 
 MODE=$(entry_mode "$NAME")
@@ -16,12 +16,12 @@ REPO_DIR=$(repo_dir "$NAME")
 PIN_DIR=$(pin_dir "$NAME")
 
 if [ ! -d "$REPO_DIR/.git" ]; then
-  echo "ERROR: $NAME clone does not exist. Run 'bash forks/forker/record.sh $NAME' first." >&2
+  echo "ERROR: $NAME clone does not exist. Run 'bash $TOOL_REL/record.sh $NAME' first." >&2
   exit 1
 fi
 
 PINNED_HEAD=$(pinned_head "$PIN_DIR" 2>/dev/null) || {
-  echo "ERROR: No pins found. Run 'bash forks/forker/record.sh $NAME' first." >&2
+  echo "ERROR: No pins found. Run 'bash $TOOL_REL/record.sh $NAME' first." >&2
   exit 1
 }
 
@@ -61,7 +61,7 @@ fi
 
 if ! saved_series_matches_ref "$REPO_DIR" "$PIN_DIR" "$CURRENT_HEAD"; then
   echo "ERROR: live wip commit series does not match the saved pin series." >&2
-  echo "Run 'bash forks/forker/save.sh $NAME' before pushing." >&2
+  echo "Run 'bash $TOOL_REL/save.sh $NAME' before pushing." >&2
   echo "  pinned HEAD: $PINNED_HEAD" >&2
   exit 1
 fi
@@ -71,7 +71,7 @@ if [ $# -gt 0 ]; then
 else
   TARGET=$(git -C "$REPO_DIR" for-each-ref --sort=-committerdate --format='%(refname:short)' 'refs/heads/pr-*' | sed -n '1p')
   if [ -z "$TARGET" ]; then
-    echo "ERROR: No target branch. Pass one explicitly, for example 'bash forks/forker/push.sh $NAME pr-123'." >&2
+    echo "ERROR: No target branch. Pass one explicitly, for example 'bash $TOOL_REL/push.sh $NAME pr-123'." >&2
     exit 1
   fi
 fi
@@ -145,4 +145,4 @@ elif [ -n "${FORK_REMOTE:-}" ]; then
 else
   echo "  No fork remote is configured for $NAME. Push the target branch with your chosen remote."
 fi
-echo "  After pushing and updating refs, re-record:  bash forks/forker/record.sh $NAME"
+echo "  After pushing and updating refs, re-record:  bash $TOOL_REL/record.sh $NAME"

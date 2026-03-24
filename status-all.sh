@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Check status of all configured entries.
 # Exits non-zero if any entry has pending work.
-# Usage: forks/forker/status-all.sh
+# Usage: $TOOL_REL/status-all.sh
 
 # shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"

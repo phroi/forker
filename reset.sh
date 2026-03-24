@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # Remove a fork clone and its pins (full reset).
-# Usage: forks/forker/reset.sh <name>
+# Usage: $TOOL_REL/reset.sh <name>
 
 # shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-NAME="${1:?Usage: forks/forker/reset.sh <name>}"
+NAME="${1:?Usage: $TOOL_REL/reset.sh <name>}"
 
 MODE=$(entry_mode "$NAME")
 if [ "$MODE" != "managed" ]; then

@@ -3,12 +3,12 @@ set -euo pipefail
 
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-NAME="${1:?Usage: forks/forker/record.sh <name> [ref ...]}"
+NAME="${1:?Usage: $TOOL_REL/record.sh <name> [ref ...]}"
 shift
 
 MODE=$(entry_mode "$NAME")
 if [ "$MODE" != "managed" ]; then
-  echo "ERROR: $NAME is a reference entry. Use 'bash forks/forker/update.sh $NAME'." >&2
+  echo "ERROR: $NAME is a reference entry. Use 'bash $TOOL_REL/update.sh $NAME'." >&2
   exit 1
 fi
 
@@ -26,6 +26,10 @@ resolve_conflict() {
   local FILE="$1" F_REL="$2" OLD_RES="${3:-}"
   local COUNT WORK i OURS BASE THEIRS
 
+  # Resolve each conflicted file in tiers: deterministic base-aware choices,
+  # reuse of previously recorded resolutions, cheap coworker classification,
+  # then full generated merges only for the remaining custom cases.
+
   COUNT=$(awk 'substr($0,1,7)=="<<<<<<<"{n++} END{print n+0}' "$FILE")
   [ "$COUNT" -gt 0 ] || { echo "ERROR: no conflict markers in $FILE" >&2; return 1; }
 
@@ -41,6 +45,8 @@ resolve_conflict() {
   ' "$FILE"
 
   for i in $(seq 1 "$COUNT"); do
+    # Create empty hunk files up front so later diff and line-count logic can
+    # treat missing sections the same as empty ones.
     touch "$WORK/c${i}_ours" "$WORK/c${i}_base" "$WORK/c${i}_theirs"
   done
 
@@ -86,6 +92,8 @@ resolve_conflict() {
     OURS="$WORK/c${i}_ours"
     BASE="$WORK/c${i}_base"
     THEIRS="$WORK/c${i}_theirs"
+    # Tier 0: when one side matches base, or both sides already match each
+    # other, the correct resolution is deterministic and needs no coworker call.
     if diff -q "$OURS" "$BASE" >/dev/null 2>&1; then
       cp "$THEIRS" "$WORK/r$i"
       echo "  conflict $i: deterministic (take theirs)" >&2
@@ -102,6 +110,9 @@ resolve_conflict() {
 
   _finish() {
     local i ours_n base_n theirs_n res_n res_data
+
+    # Build the counted sidecar that replay.sh can use later to reconstruct the
+    # exact merged file positionally, even if patch context has drifted.
 
     for i in $(seq 1 "$COUNT"); do
       [ -f "$WORK/r$i" ] || { echo "ERROR: missing resolution for conflict $i in $FILE" >&2; return 1; }
@@ -140,6 +151,8 @@ resolve_conflict() {
           continue
         fi
       elif [ -f "$WORK/old_ours_n$i" ]; then
+        # Weak bootstrap match: older sidecars may predate fingerprints, so
+        # fall back to line-count compatibility before asking coworker again.
         local curr_on curr_bn curr_tn
         curr_on=$(wc -l < "$WORK/c${i}_ours")
         curr_bn=0
@@ -246,7 +259,7 @@ if ! bash "$FORKER_DIR/status.sh" "$NAME" >/dev/null 2>&1; then
   bash "$FORKER_DIR/status.sh" "$NAME" >&2
   echo >&2
   echo "ERROR: $NAME has pending work that would be lost." >&2
-  echo "Push with 'bash forks/forker/push.sh $NAME', commit, or remove the clone manually." >&2
+  echo "Push with 'bash $TOOL_REL/push.sh $NAME', commit, or remove the clone manually." >&2
   exit 1
 fi
 
@@ -266,6 +279,8 @@ fi
 
 OLD_RES_TMP=""
 if [ "$(count_glob "$REAL_PIN"/res-*.resolution)" -gt 0 ]; then
+  # Keep previous conflict sidecars around so re-record can reuse them instead
+  # of re-querying coworker for already-understood merge conflicts.
   OLD_RES_TMP=$(mktemp -d)
   cp "$REAL_PIN"/res-*.resolution "$OLD_RES_TMP/"
 fi
@@ -274,6 +289,9 @@ WORK_DIR=$(mktemp -d "$FORKS_DIR/.work-${NAME}.XXXXXX")
 WORK_REPO="$WORK_DIR/clone"
 WORK_PIN="$WORK_DIR/pin"
 mkdir -p "$WORK_PIN"
+
+# Build the new clone and pins in a staging directory on the same filesystem so
+# the final move into place stays atomic.
 
 export _FORKER_WORK_REPO="$WORK_REPO"
 export _FORKER_WORK_PIN="$WORK_PIN"
@@ -294,6 +312,8 @@ trap cleanup_staging EXIT
 
 git clone --filter=blob:none "$UPSTREAM" "$REPO_DIR"
 
+# Match replay.sh conflict-marker settings so recorded and replayed merges see
+# identical diff3 markers and 40-char SHAs inside the conflict hunks.
 git -C "$REPO_DIR" config merge.conflictStyle diff3
 git -C "$REPO_DIR" config core.abbrev 40
 
@@ -308,6 +328,8 @@ for REF in "${REFS[@]}"; do
   MERGE_IDX=$((MERGE_IDX + 1))
   deterministic_env "$MERGE_IDX"
 
+  # Accept direct SHAs, PR numbers, or branch names on the CLI, but always
+  # resolve them to a concrete merge SHA before writing manifest or merging.
   if [[ $REF =~ ^[0-9a-f]{7,40}$ ]]; then
     git -C "$REPO_DIR" fetch --depth=1 origin "$REF"
     MERGE_REF="FETCH_HEAD"
@@ -323,15 +345,21 @@ for REF in "${REFS[@]}"; do
   printf '%s\t%s\n' "$MERGE_SHA" "$REF" >> "$PIN_DIR/manifest"
 
   MERGE_MSG="Merge $REF into wip"
+  # Record and replay both merge by SHA with the same explicit message so the
+  # resulting merge commits stay byte-identical across rebuilds.
   if ! git -C "$REPO_DIR" merge --no-ff -m "$MERGE_MSG" "$MERGE_SHA"; then
     mapfile -t CONFLICTED < <(git -C "$REPO_DIR" diff --name-only --diff-filter=U)
 
     OLD_MERGE_RES=""
     if [ -n "${OLD_RES_TMP:-}" ] && [ -f "$OLD_RES_TMP/res-${MERGE_IDX}.resolution" ]; then
+      # Reuse the prior merge-step sidecar when the same ref still conflicts in
+      # a compatible way.
       OLD_MERGE_RES="$OLD_RES_TMP/res-${MERGE_IDX}.resolution"
     fi
 
     PIDS=()
+    # Resolve each conflicted file in parallel because the coworker path is by
+    # far the slowest part of recording a conflicted merge.
     for FILE in "${CONFLICTED[@]}"; do
       resolve_conflict "$REPO_DIR/$FILE" "$FILE" "$OLD_MERGE_RES" > "$REPO_DIR/${FILE}.resolved" &
       PIDS+=($!)
@@ -362,6 +390,8 @@ for REF in "${REFS[@]}"; do
       rm "$REPO_DIR/${FILE}.resolution"
     done
 
+    # merge --continue reuses .git/MERGE_MSG, so overwrite it with our stable
+    # message before finishing the deterministic merge commit.
     echo "$MERGE_MSG" > "$REPO_DIR/.git/MERGE_MSG"
     GIT_EDITOR=true git -C "$REPO_DIR" merge --continue
   fi
@@ -393,6 +423,8 @@ fi
 unset _FORKER_WORK_REPO _FORKER_WORK_PIN
 trap - EXIT
 mkdir -p "$FORKS_DIR/.pin"
+# Atomic swap: only after the rebuilt clone and pins are complete do we replace
+# the live clone and pin dir in one move.
 rm -rf "$REAL_REPO" "$REAL_PIN"
 mv "$WORK_REPO" "$REAL_REPO"
 mv "$WORK_PIN" "$REAL_PIN"

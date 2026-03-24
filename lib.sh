@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 
+# Shared helper functions for the forker scripts. Keep this file focused on
+# config access, pin/clone path resolution, and deterministic replay helpers.
+
 FORKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FORKS_DIR="$(cd "$FORKER_DIR/.." && pwd)"
+TOOL_REL="forks/$(basename "$FORKER_DIR")"
 ROOT_DIR="$(cd "$FORKS_DIR/.." && pwd)"
 PACKAGE_ROOT="${FORKER_PACKAGE_ROOT:-$ROOT_DIR}"
 
 config_val() {
+  # Read one config entry and evaluate a jq expression against it.
   jq -r ".[\"$1\"] | $2" "$FORKS_DIR/config.json"
 }
 
@@ -14,6 +19,8 @@ entry_mode() {
 }
 
 repo_dir() {
+  # Workflows that stage a rebuilt clone can override the live repo path with
+  # _FORKER_WORK_REPO so helpers keep targeting the staging area.
   if [ -n "${_FORKER_WORK_REPO:-}" ]; then
     echo "$_FORKER_WORK_REPO"
   else
@@ -22,6 +29,7 @@ repo_dir() {
 }
 
 pin_dir() {
+  # Like repo_dir(), but for staged pin writes before the final atomic move.
   if [ -n "${_FORKER_WORK_PIN:-}" ]; then
     echo "$_FORKER_WORK_PIN"
   else
@@ -48,6 +56,8 @@ repo_refs() {
 }
 
 discover_forks() {
+  # Historical name retained for callers that expect the tool repo itself to be
+  # excluded from batch operations.
   batch_entries
 }
 
@@ -94,6 +104,8 @@ merge_count() {
 }
 
 deterministic_env() {
+  # Replay and record use synthetic commit metadata so the same inputs produce
+  # byte-identical commits and stable HEAD pins.
   export GIT_AUTHOR_NAME="ci" GIT_AUTHOR_EMAIL="ci@local"
   export GIT_COMMITTER_NAME="ci" GIT_COMMITTER_EMAIL="ci@local"
   export GIT_AUTHOR_DATE="@$1 +0000" GIT_COMMITTER_DATE="@$1 +0000"
@@ -426,11 +438,11 @@ apply_counted_resolutions() {
         err = 1; exit 1
       }
       for (i = 0; i < c[cn,"ours"]; i++) getline
-      getline
+      getline  # |||||||
       for (i = 0; i < c[cn,"base"]; i++) getline
-      getline
+      getline  # =======
       for (i = 0; i < c[cn,"theirs"]; i++) getline
-      getline
+      getline  # >>>>>>>
       for (i = 1; i <= c[cn,"resolution"]; i++) print r[cn,i]
       next
     }
@@ -453,6 +465,8 @@ apply_resolution_file() {
   tmp_dir=$(mktemp -d)
   trap 'rm -rf "$tmp_dir"' RETURN
 
+  # Split a multi-file resolution sidecar into per-file chunks, then feed each
+  # chunk back through apply_counted_resolutions for positional reconstruction.
   awk -v dir="$tmp_dir" '
   /^--- / {
     if (f) close(f)

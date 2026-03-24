@@ -11,13 +11,13 @@ Forker manages two entry modes from `forks/config.json`:
 
 ```json
 {
-  "ccc": {
+  "ckb-devrel_ccc": {
     "upstream": "https://github.com/org/repo.git",
     "fork": "git@github.com:you/repo.git",
     "mode": "managed",
     "refs": ["42", "feature-branch"]
   },
-  "ckb": {
+  "nervosnetwork_ckb": {
     "upstream": "https://github.com/org/other-repo.git",
     "mode": "reference"
   }
@@ -34,7 +34,7 @@ Forker manages two entry modes from `forks/config.json`:
 Managed state lives in `forks/.pin/<name>/`.
 
 ```text
-forks/.pin/ccc/
+forks/.pin/ckb-devrel_ccc/
   HEAD
   LOCAL_BASE
   manifest
@@ -55,8 +55,8 @@ forks/.pin/ccc/
 Reference entries:
 
 ```bash
-bash forks/forker/update.sh ckb
-bash forks/forker/update-all.sh
+bash forks/phroi_forker/update.sh nervosnetwork_ckb
+bash forks/phroi_forker/update-all.sh
 ```
 
 - bootstrap or refresh shallow reference clones
@@ -65,10 +65,10 @@ bash forks/forker/update-all.sh
 Managed entries:
 
 ```bash
-bash forks/forker/record.sh ccc
-bash forks/forker/replay.sh ccc
-bash forks/forker/save.sh ccc
-bash forks/forker/push.sh ccc pr-123
+bash forks/phroi_forker/record.sh ckb-devrel_ccc
+bash forks/phroi_forker/replay.sh ckb-devrel_ccc
+bash forks/phroi_forker/save.sh ckb-devrel_ccc
+bash forks/phroi_forker/push.sh ckb-devrel_ccc pr-123
 ```
 
 - `record.sh`: rebuild pins from upstream plus configured refs
@@ -105,8 +105,8 @@ If the target is omitted, `push.sh` uses the most recently updated local `pr-*` 
 ## Pin Preflight
 
 ```bash
-bash forks/forker/verify-pins.sh ccc
-bash forks/forker/verify-pins-all.sh
+bash forks/phroi_forker/verify-pins.sh ckb-devrel_ccc
+bash forks/phroi_forker/verify-pins-all.sh
 ```
 
 - `verify-pins.sh`: dry-run replay for one managed entry without touching the live clone
@@ -115,20 +115,16 @@ bash forks/forker/verify-pins-all.sh
 ## Safety Commands
 
 ```bash
-bash forks/forker/status.sh ccc
-bash forks/forker/status-all.sh
-bash forks/forker/verify-pins.sh ccc
-bash forks/forker/verify-pins-all.sh
-bash forks/forker/clean.sh ccc
-bash forks/forker/replay-all.sh
-bash forks/forker/reset.sh ccc
-bash forks/forker/doctor.sh
+bash forks/phroi_forker/status.sh ckb-devrel_ccc
+bash forks/phroi_forker/status-all.sh
+bash forks/phroi_forker/clean.sh ckb-devrel_ccc
+bash forks/phroi_forker/replay-all.sh
+bash forks/phroi_forker/reset.sh ckb-devrel_ccc
+bash forks/phroi_forker/doctor.sh
 ```
 
 - `status.sh`: safe-to-wipe check for one entry
 - `status-all.sh`: same for all configured entries
-- `verify-pins.sh`: dry-run replay check for one managed entry
-- `verify-pins-all.sh`: dry-run replay check for all managed entries
 - `clean.sh`: remove a safe clone
 - `replay-all.sh`: replay missing managed clones, skip safe existing ones, continue past failures
 - `reset.sh`: managed-only full reset of clone plus pins
@@ -149,7 +145,7 @@ Replaying a managed fork still depends on the recorded merge SHAs remaining avai
 ## Requirements
 
 - `git`, `jq`
-- `pnpm coworker:ask` only for conflict handling during `record.sh`
+- `pnpm coworker:ask` for conflicted `record.sh`, and for bootstrap `save.sh` when deriving a managed base that hits conflicts
 
 ## Scope
 

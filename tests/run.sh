@@ -6,10 +6,11 @@ trap 'rm -rf "$ROOT"' EXIT
 
 TEST_ROOT="$ROOT/work"
 FORKS_ROOT="$TEST_ROOT/forks"
-FORKER_ROOT="$FORKS_ROOT/forker"
+FORKER_ROOT="$FORKS_ROOT/phroi_forker"
 
 mkdir -p "$FORKER_ROOT"
-cp -a /workspaces/research/forks/forker/. "$FORKER_ROOT/"
+SOURCE_FORKER="$(cd "$(dirname "$0")/.." && pwd)"
+cp -a "$SOURCE_FORKER"/. "$FORKER_ROOT/"
 rm -rf "$FORKER_ROOT/.git"
 
 CMD_OUTPUT=""
@@ -221,7 +222,7 @@ git -C "$FORKS_ROOT/bootstrap_refs" commit -m 'bootstrap refs local series' >/de
 
 run_cmd bash "$FORKER_ROOT/save.sh" bootstrap_refs
 assert_status 1 "bootstrap save with refs should reject clones not based on the derived managed base"
-assert_contains "$CMD_OUTPUT" 'Run '\''bash forks/forker/record.sh bootstrap_refs'\'' first' "bootstrap save with refs should require a canonical managed base"
+assert_contains "$CMD_OUTPUT" 'Run '\''bash forks/phroi_forker/record.sh bootstrap_refs'\'' first' "bootstrap save with refs should require a canonical managed base"
 
 rm -rf "$FORKS_ROOT/bootstrap_refs"
 run_cmd bash "$FORKER_ROOT/record.sh" bootstrap_refs
@@ -291,7 +292,7 @@ git -C "$FORKS_ROOT/managed" commit -m 'unsaved follow-up' >/dev/null 2>&1
 
 run_cmd bash "$FORKER_ROOT/push.sh" managed pr-1
 assert_status 1 "push.sh should reject unsaved local commits"
-assert_contains "$CMD_OUTPUT" 'Run '\''bash forks/forker/save.sh managed'\'' before pushing.' "push.sh should require saving before push"
+assert_contains "$CMD_OUTPUT" 'Run '\''bash forks/phroi_forker/save.sh managed'\'' before pushing.' "push.sh should require saving before push"
 
 [ -f "$FORKS_ROOT/.pin/managed/LOCAL_BASE" ] || fail "save.sh should write LOCAL_BASE"
 [ "$(find "$FORKS_ROOT/.pin/managed/series" -name '*.patch' | wc -l)" -eq 1 ] || fail "save.sh should write one saved series patch"
@@ -305,7 +306,7 @@ assert_contains "$(cat "$FORKS_ROOT/managed/README.md")" 'saved series text' "re
 
 run_cmd bash "$FORKER_ROOT/replay.sh" managed
 assert_status 1 "replay.sh should refuse to overwrite an existing managed clone"
-assert_contains "$CMD_OUTPUT" 'Use '\''bash forks/forker/clean.sh managed'\'' before replaying.' "replay.sh should tell the user how to rebuild"
+assert_contains "$CMD_OUTPUT" 'Use '\''bash forks/phroi_forker/clean.sh managed'\'' before replaying.' "replay.sh should tell the user how to rebuild"
 
 git -C "$FORKS_ROOT/managed" config user.email ci@example.com
 git -C "$FORKS_ROOT/managed" config user.name ci
@@ -340,6 +341,8 @@ rm -f "$FORKS_ROOT/bootstrap_refs/dirty.txt"
 
 FAKEBIN="$ROOT/fake-bin"
 mkdir -p "$FAKEBIN"
+ln -s "$(command -v bash)" "$FAKEBIN/bash"
+ln -s "$(command -v basename)" "$FAKEBIN/basename"
 ln -s "$(command -v git)" "$FAKEBIN/git"
 ln -s "$(command -v jq)" "$FAKEBIN/jq"
 ln -s "$(command -v dirname)" "$FAKEBIN/dirname"

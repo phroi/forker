@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Replay all managed entries from their pins.
-# Usage: forks/forker/replay-all.sh
+# Usage: $TOOL_REL/replay-all.sh
 
 # shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Exit 0 only when an entry is safe to wipe and rebuild. Managed entries must
+# match their saved pin series; reference entries must match their remote tip.
+
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-NAME="${1:?Usage: forks/forker/status.sh <name>}"
+NAME="${1:?Usage: $TOOL_REL/status.sh <name>}"
 
 REPO_DIR=$(repo_dir "$NAME")
 PIN_DIR=$(pin_dir "$NAME")

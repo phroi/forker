@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Clean all non-tool clones that status.sh says are safe to remove.
-# Usage: forks/forker/clean-all.sh
+# Usage: $TOOL_REL/clean-all.sh
 
 # shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Save the committed local work above LOCAL_BASE as a full format-patch series.
+# This intentionally ignores unstaged history and rewrites the full saved series.
+
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-NAME="${1:?Usage: forks/forker/save.sh <name>}"
+NAME="${1:?Usage: $TOOL_REL/save.sh <name>}"
 
 MODE=$(entry_mode "$NAME")
 if [ "$MODE" != "managed" ]; then
@@ -18,7 +21,7 @@ BOOTSTRAP_REPO=""
 BOOTSTRAP_PIN=""
 
 if [ ! -d "$REPO_DIR/.git" ]; then
-  echo "ERROR: $NAME clone does not exist. Run 'bash forks/forker/record.sh $NAME' first." >&2
+  echo "ERROR: $NAME clone does not exist. Run 'bash $TOOL_REL/record.sh $NAME' first." >&2
   exit 1
 fi
 
@@ -56,7 +59,7 @@ if PINNED_HEAD=$(pinned_head "$PIN_DIR" 2>/dev/null); then
 
   if ! git -C "$REPO_DIR" merge-base --is-ancestor "$BASE_COMMIT" HEAD >/dev/null 2>&1; then
     echo "ERROR: wip is not based on the pinned LOCAL_BASE." >&2
-    echo "Use 'bash forks/forker/clean.sh $NAME' and then 'bash forks/forker/replay.sh $NAME' before saving again." >&2
+    echo "Use 'bash $TOOL_REL/clean.sh $NAME' and then 'bash $TOOL_REL/replay.sh $NAME' before saving again." >&2
     exit 1
   fi
 
@@ -105,7 +108,7 @@ else
 
   if ! git -C "$REPO_DIR" merge-base --is-ancestor FETCH_HEAD HEAD >/dev/null 2>&1; then
     echo "ERROR: live clone is not based on the config-derived managed base." >&2
-    echo "Run 'bash forks/forker/record.sh $NAME' first, then make commits on wip before saving." >&2
+    echo "Run 'bash $TOOL_REL/record.sh $NAME' first, then make commits on wip before saving." >&2
     exit 1
   fi
 

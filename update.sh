@@ -3,7 +3,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-NAME="${1:?Usage: forks/forker/update.sh <name>}"
+NAME="${1:?Usage: $TOOL_REL/update.sh <name>}"
 
 MODE=$(entry_mode "$NAME")
 UPSTREAM=$(upstream_url "$NAME")
