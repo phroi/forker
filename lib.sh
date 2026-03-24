@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# Shared helpers for fork management scripts
 
 FORKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FORKS_DIR="$(cd "$FORKER_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$FORKS_DIR/.." && pwd)"
+PACKAGE_ROOT="${FORKER_PACKAGE_ROOT:-$ROOT_DIR}"
 
-# Read a value from forks/config.json for a given entry
-# Usage: config_val <name> <jq-expr>
 config_val() {
   jq -r ".[\"$1\"] | $2" "$FORKS_DIR/config.json"
 }
 
-# Get the clone directory path for a fork entry.
-# When _FORKER_WORK_REPO is exported (atomic-swap mode in record/replay),
-# returns the staging path so subprocesses like patch.sh target it.
-# Usage: repo_dir <name>
+entry_mode() {
+  config_val "$1" '.mode'
+}
+
 repo_dir() {
   if [ -n "${_FORKER_WORK_REPO:-}" ]; then
     echo "$_FORKER_WORK_REPO"
@@ -23,10 +21,6 @@ repo_dir() {
   fi
 }
 
-# Get the pin directory path for a fork entry.
-# When _FORKER_WORK_PIN is exported (atomic-swap mode in record.sh),
-# returns the staging path.
-# Usage: pin_dir <name>
 pin_dir() {
   if [ -n "${_FORKER_WORK_PIN:-}" ]; then
     echo "$_FORKER_WORK_PIN"
@@ -35,112 +29,379 @@ pin_dir() {
   fi
 }
 
-# Get the upstream URL from config
-# Usage: upstream_url <name>
 upstream_url() {
   config_val "$1" '.upstream'
 }
 
-# Get the fork URL from config (may be empty)
-# Usage: fork_url <name>
+coworker_ask() {
+  pnpm --dir "$PACKAGE_ROOT" --silent coworker:ask "$@"
+}
+
 fork_url() {
   local url
   url=$(config_val "$1" '.fork // empty')
   [ -n "$url" ] && echo "$url"
 }
 
-# Get the refs array from config as lines
-# Usage: repo_refs <name>
 repo_refs() {
-  config_val "$1" '.refs[]'
+  config_val "$1" '(.refs // [])[]'
 }
 
-# Discover all fork entry names from config.json (excludes forker itself)
-# Usage: discover_forks
 discover_forks() {
+  batch_entries
+}
+
+batch_entries() {
   local tool_name
   tool_name=$(basename "$FORKER_DIR")
   jq -r --arg skip "$tool_name" 'keys[] | select(. != $skip)' "$FORKS_DIR/config.json"
 }
 
-# Read the expected HEAD SHA from .pin/<name>/HEAD
-# Usage: pinned_head <pin-dir>
+all_entries() {
+  jq -r 'keys[]' "$FORKS_DIR/config.json"
+}
+
+entries_in_mode() {
+  jq -r --arg mode "$1" 'to_entries[] | select(.value.mode == $mode) | .key' "$FORKS_DIR/config.json"
+}
+
+managed_entries() {
+  entries_in_mode managed
+}
+
+reference_entries() {
+  entries_in_mode reference
+}
+
 pinned_head() {
   local f="$1/HEAD"
   [ -f "$f" ] && cat "$f" || return 1
 }
 
-# Return path to .pin/<name>/manifest if it exists
-# Usage: manifest_file <pin-dir>
 manifest_file() {
   local f="$1/manifest"
   [ -f "$f" ] && echo "$f" || return 1
 }
 
-# Check whether pins exist (manifest present)
-# Usage: has_pin <pin-dir>
 has_pin() {
   [ -f "$1/manifest" ]
 }
 
-# Count merge refs in manifest (total lines minus base line)
-# Usage: merge_count <pin-dir>
 merge_count() {
   local mf
   mf=$(manifest_file "$1") || return 1
   echo $(( $(wc -l < "$mf") - 1 ))
 }
 
-# Export deterministic git identity for reproducible commits
-# Usage: deterministic_env <epoch-seconds>
 deterministic_env() {
   export GIT_AUTHOR_NAME="ci" GIT_AUTHOR_EMAIL="ci@local"
   export GIT_COMMITTER_NAME="ci" GIT_COMMITTER_EMAIL="ci@local"
   export GIT_AUTHOR_DATE="@$1 +0000" GIT_COMMITTER_DATE="@$1 +0000"
 }
 
-# Count files matching a glob pattern (pipefail-safe alternative to ls|wc -l)
-# Usage: count_glob pattern  (e.g., count_glob "$dir"/local-*.patch)
 count_glob() {
   local n=0
+  local f
   for f in "$@"; do
     [ -f "$f" ] && n=$((n + 1))
   done
   echo "$n"
 }
 
-# Apply local patches from .pin/<name>/ as deterministic commits.
-# Timestamp sequence continues from patch.sh: merge_count+1 is patch.sh,
-# so local patches start at merge_count+2.
-# Returns 1 if any patch fails to apply (caller should add remediation advice).
-# Usage: apply_local_patches <repo-dir> <pin-dir>
-apply_local_patches() {
-  local repo_dir="$1" p_dir="$2"
-  local mc ts patch name
-  mc=$(merge_count "$p_dir") || mc=0
-  ts=$((mc + 2))
-  for patch in "$p_dir"/local-*.patch; do
-    [ -f "$patch" ] || return 0
-    name=$(basename "$patch" .patch)
-    echo "Applying local patch: $name" >&2
-    if ! git -C "$repo_dir" apply "$patch"; then
-      echo "ERROR: Local patch $name failed to apply." >&2
-      return 1
-    fi
-    deterministic_env "$ts"
-    git -C "$repo_dir" add -A
-    git -C "$repo_dir" commit -m "local: $name"
-    ts=$((ts + 1))
+series_dir() {
+  echo "$1/series"
+}
+
+local_base_file() {
+  local f="$1/LOCAL_BASE"
+  [ -f "$f" ] && echo "$f" || return 1
+}
+
+local_base() {
+  local f
+  f=$(local_base_file "$1") || return 1
+  cat "$f"
+}
+
+write_local_base() {
+  printf '%s\n' "$2" > "$1/LOCAL_BASE"
+}
+
+saved_series_count() {
+  count_glob "$(series_dir "$1")"/*.patch
+}
+
+saved_series_files() {
+  local dir
+  local patch
+
+  dir=$(series_dir "$1")
+  for patch in "$dir"/*.patch; do
+    [ -f "$patch" ] && echo "$patch"
   done
 }
 
-# Apply counted conflict resolutions to a single conflicted file.
-# Reads resolution data (CONFLICT headers + content lines) from $1,
-# walks the conflicted file $2 positionally by line counts (never inspects
-# content), and outputs the resolved file to stdout.
-# Exits non-zero if the conflict count in the resolution data doesn't match
-# the number of <<<<<<< markers in the file (catches fake markers).
-# Usage: apply_counted_resolutions <resolution-data> <conflicted-file>
+copy_saved_series() {
+  local src="$1"
+  local dst="$2"
+  local patch
+
+  mkdir -p "$(series_dir "$dst")"
+  while IFS= read -r patch; do
+    [ -n "$patch" ] || continue
+    cp "$patch" "$(series_dir "$dst")/"
+  done < <(saved_series_files "$src")
+}
+
+remove_saved_series() {
+  rm -rf "$(series_dir "$1")"
+}
+
+has_legacy_local_patches() {
+  [ -f "$1/local.patch" ] || [ "$(count_glob "$1"/local-*.patch)" -gt 0 ]
+}
+
+export_commit_series() {
+  local repo_dir="$1"
+  local base_ref="$2"
+  local end_ref="$3"
+  local out_dir="$4"
+
+  rm -rf "$out_dir"
+  mkdir -p "$out_dir"
+
+  if ! git -C "$repo_dir" merge-base --is-ancestor "$base_ref" "$end_ref" >/dev/null 2>&1; then
+    echo "ERROR: $base_ref is not an ancestor of $end_ref in $repo_dir" >&2
+    return 1
+  fi
+
+  if [ "$(git -C "$repo_dir" rev-list --count "$base_ref..$end_ref")" -eq 0 ]; then
+    return 0
+  fi
+
+  git -C "$repo_dir" format-patch \
+    --quiet \
+    --no-signature \
+    --binary \
+    --full-index \
+    -o "$out_dir" \
+    "$base_ref..$end_ref" >/dev/null
+}
+
+commit_range_has_merges() {
+  local repo_dir="$1"
+  local base_ref="$2"
+  local end_ref="$3"
+
+  [ "$(git -C "$repo_dir" rev-list --merges --count "$base_ref..$end_ref")" -gt 0 ]
+}
+
+compare_series_dirs() {
+  local left="$1"
+  local right="$2"
+  local left_list right_list idx left_file right_file
+
+  mapfile -t left_list < <(printf '%s\n' "$left"/*.patch | sort)
+  mapfile -t right_list < <(printf '%s\n' "$right"/*.patch | sort)
+
+  if [ "${#left_list[@]}" -eq 1 ] && [ "${left_list[0]}" = "$left/*.patch" ]; then
+    left_list=()
+  fi
+  if [ "${#right_list[@]}" -eq 1 ] && [ "${right_list[0]}" = "$right/*.patch" ]; then
+    right_list=()
+  fi
+
+  [ "${#left_list[@]}" -eq "${#right_list[@]}" ] || return 1
+
+  for idx in "${!left_list[@]}"; do
+    left_file=${left_list[$idx]}
+    right_file=${right_list[$idx]}
+    cmp -s <(normalize_patch_stream "$left_file") <(normalize_patch_stream "$right_file") || return 1
+  done
+}
+
+normalize_patch_stream() {
+  # Drop the volatile first line and normalize the numbered Subject prefix so
+  # equivalent patch series compare equal even when format-patch renumbers them.
+  sed -e '1d' -e 's/^Subject: \[PATCH [0-9][0-9]*\/[0-9][0-9]*\]/Subject: [PATCH]/' "$1"
+}
+
+series_prefix_length() {
+  local left="$1"
+  local right="$2"
+  local left_list right_list idx limit prefix=0
+
+  mapfile -t left_list < <(printf '%s\n' "$left"/*.patch | sort)
+  mapfile -t right_list < <(printf '%s\n' "$right"/*.patch | sort)
+
+  if [ "${#left_list[@]}" -eq 1 ] && [ "${left_list[0]}" = "$left/*.patch" ]; then
+    left_list=()
+  fi
+  if [ "${#right_list[@]}" -eq 1 ] && [ "${right_list[0]}" = "$right/*.patch" ]; then
+    right_list=()
+  fi
+
+  limit=${#left_list[@]}
+  if [ "${#right_list[@]}" -lt "$limit" ]; then
+    limit=${#right_list[@]}
+  fi
+
+  # Count the longest common prefix, not just equality, so push.sh can resume
+  # from a partially pushed series without re-cherry-picking earlier commits.
+  for ((idx = 0; idx < limit; idx++)); do
+    if cmp -s <(normalize_patch_stream "${left_list[$idx]}") <(normalize_patch_stream "${right_list[$idx]}"); then
+      prefix=$((prefix + 1))
+    else
+      break
+    fi
+  done
+
+  echo "$prefix"
+}
+
+saved_series_matches_ref() {
+  local repo_dir="$1"
+  local pin_dir="$2"
+  local end_ref="${3:-HEAD}"
+  local base_ref tmp_dir saved_dir
+
+  base_ref=$(local_base "$pin_dir") || return 1
+  tmp_dir=$(mktemp -d)
+  trap 'rm -rf "$tmp_dir"' RETURN
+  saved_dir=$(series_dir "$pin_dir")
+
+  export_commit_series "$repo_dir" "$base_ref" "$end_ref" "$tmp_dir/live" || return 1
+
+  if [ ! -d "$saved_dir" ]; then
+    [ "$(count_glob "$tmp_dir/live"/*.patch)" -eq 0 ]
+    return
+  fi
+
+  compare_series_dirs "$saved_dir" "$tmp_dir/live"
+}
+
+apply_saved_series() {
+  local repo_dir="$1"
+  local pin_dir="$2"
+  local dir
+
+  dir=$(series_dir "$pin_dir")
+  [ -d "$dir" ] || return 0
+  [ "$(count_glob "$dir"/*.patch)" -gt 0 ] || return 0
+
+  echo "Applying saved series" >&2
+
+  if ! GIT_COMMITTER_NAME="ci" GIT_COMMITTER_EMAIL="ci@local" \
+    git -C "$repo_dir" am --3way --committer-date-is-author-date "$dir"/*.patch; then
+    git -C "$repo_dir" am --abort >/dev/null 2>&1 || true
+    echo "ERROR: Saved series failed to apply." >&2
+    return 1
+  fi
+}
+
+repo_head() {
+  git -C "$1" rev-parse HEAD
+}
+
+repo_has_untracked() {
+  [ -n "$(git -C "$1" ls-files --others --exclude-standard 2>/dev/null)" ]
+}
+
+repo_has_stash() {
+  [ -n "$(git -C "$1" stash list 2>/dev/null)" ]
+}
+
+repo_has_worktree_changes() {
+  ! git -C "$1" diff --quiet 2>/dev/null \
+    || ! git -C "$1" diff --cached --quiet 2>/dev/null \
+    || repo_has_untracked "$1" \
+    || repo_has_stash "$1"
+}
+
+local_origin_head_ref() {
+  git -C "$1" symbolic-ref -q --short refs/remotes/origin/HEAD
+}
+
+current_upstream_ref() {
+  git -C "$1" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null
+}
+
+reference_baseline_ref() {
+  local ref
+
+  ref=$(local_origin_head_ref "$1" 2>/dev/null) || ref=""
+  if [ -n "$ref" ]; then
+    echo "$ref"
+    return 0
+  fi
+
+  current_upstream_ref "$1"
+}
+
+ref_label() {
+  case "$1" in
+    refs/remotes/origin/*)
+      echo "${1#refs/remotes/origin/}"
+      ;;
+    origin/*)
+      echo "${1#origin/}"
+      ;;
+    refs/heads/*)
+      echo "${1#refs/heads/}"
+      ;;
+    *)
+      echo "$1"
+      ;;
+  esac
+}
+
+reference_baseline_label() {
+  local ref
+  ref=$(reference_baseline_ref "$1") || return 1
+  ref_label "$ref"
+}
+
+local_origin_head_sha() {
+  local ref
+  ref=$(reference_baseline_ref "$1") || return 1
+  git -C "$1" rev-parse "$ref"
+}
+
+remote_default_branch() {
+  git ls-remote --symref "$1" HEAD | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2; exit }'
+}
+
+set_local_origin_head() {
+  git -C "$1" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$2"
+}
+
+show_repo_worktree_changes() {
+  local repo_dir="$1"
+  local base_ref="${2:-}"
+
+  if [ -n "$base_ref" ]; then
+    git -C "$repo_dir" diff "$base_ref" --stat 2>/dev/null || true
+    git -C "$repo_dir" diff --cached "$base_ref" --stat 2>/dev/null || true
+  else
+    git -C "$repo_dir" diff --stat 2>/dev/null || true
+    git -C "$repo_dir" diff --cached --stat 2>/dev/null || true
+  fi
+
+  git -C "$repo_dir" ls-files --others --exclude-standard 2>/dev/null || true
+  git -C "$repo_dir" stash list 2>/dev/null || true
+}
+
+reference_clone_is_clean() {
+  local repo_dir="$1"
+  local baseline
+
+  baseline=$(local_origin_head_sha "$repo_dir") || return 1
+
+  [ "$(repo_head "$repo_dir")" = "$baseline" ] || return 1
+  repo_has_worktree_changes "$repo_dir" && return 1
+  return 0
+}
+
 apply_counted_resolutions() {
   awk '
   FNR==NR {
@@ -165,11 +426,11 @@ apply_counted_resolutions() {
         err = 1; exit 1
       }
       for (i = 0; i < c[cn,"ours"]; i++) getline
-      getline  # |||||||
+      getline
       for (i = 0; i < c[cn,"base"]; i++) getline
-      getline  # =======
+      getline
       for (i = 0; i < c[cn,"theirs"]; i++) getline
-      getline  # >>>>>>>
+      getline
       for (i = 1; i <= c[cn,"resolution"]; i++) print r[cn,i]
       next
     }
@@ -184,46 +445,14 @@ apply_counted_resolutions() {
   ' "$1" "$2"
 }
 
-# Regenerate fork workspace entries in pnpm-workspace.yaml.
-# Reads forks/config.json and replaces the section between
-# @generated markers with computed include/exclude globs.
-# Usage: sync_workspace_yaml
-sync_workspace_yaml() {
-  local yaml="$ROOT_DIR/pnpm-workspace.yaml"
-  local entries=""
-
-  while IFS= read -r name; do
-    mapfile -t includes < <(config_val "$name" '.workspace.include // [] | .[]')
-    [ ${#includes[@]} -eq 0 ] && continue
-
-    for inc in "${includes[@]}"; do
-      entries+="  - forks/${name}/${inc}"$'\n'
-    done
-
-    mapfile -t excludes < <(config_val "$name" '.workspace.exclude // [] | .[]')
-    for excl in "${excludes[@]}"; do
-      entries+="  - \"!forks/${name}/${excl}\""$'\n'
-    done
-  done < <(discover_forks)
-
-  awk -v entries="$entries" '
-    /^  # @generated begin forker-workspaces/ { print; printf "%s", entries; skip=1; next }
-    /^  # @generated end forker-workspaces/ { skip=0; print; next }
-    !skip { print }
-  ' "$yaml" > "$yaml.tmp" && mv "$yaml.tmp" "$yaml"
-}
-
-# Apply a multi-file resolution file to a repo directory.
-# Splits by "--- path" headers into per-file chunks, then calls
-# apply_counted_resolutions for each file, replacing it in-place.
-# Usage: apply_resolution_file <repo-dir> <resolution-file>
 apply_resolution_file() {
   local repo_dir="$1" res_file="$2"
   local tmp_dir
+  local i=0 path
+
   tmp_dir=$(mktemp -d)
   trap 'rm -rf "$tmp_dir"' RETURN
 
-  # Split by --- headers; write path list and per-file chunks
   awk -v dir="$tmp_dir" '
   /^--- / {
     if (f) close(f)
@@ -239,11 +468,9 @@ apply_resolution_file() {
 
   [ -f "$tmp_dir/paths" ] || return 0
 
-  local i=0 path
   while IFS= read -r path; do
     i=$((i + 1))
-    apply_counted_resolutions "$tmp_dir/chunk-$i" "$repo_dir/$path" \
-      > "$repo_dir/${path}.resolved.tmp"
+    apply_counted_resolutions "$tmp_dir/chunk-$i" "$repo_dir/$path" > "$repo_dir/${path}.resolved.tmp"
     mv "$repo_dir/${path}.resolved.tmp" "$repo_dir/$path"
   done < "$tmp_dir/paths"
 }
