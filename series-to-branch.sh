@@ -5,8 +5,10 @@ source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 source "$FORKER_DIR/workflow-lib.sh"
 
 main() {
-  local name="${1:?Usage: $TOOL_REL/verify-pins.sh <name>}"
-  verify_pins_workflow "$name"
+  local name="${1:?Usage: $TOOL_REL/series-to-branch.sh <name> [target-branch]}"
+  shift
+
+  series_to_branch_workflow "$name" "$@"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
