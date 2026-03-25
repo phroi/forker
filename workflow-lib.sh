@@ -15,6 +15,19 @@ require_managed_entry() {
   fi
 }
 
+rebuild_reference_clone_unlocked() {
+  local name="$1" upstream="$2" default_branch="$3"
+  local work_repo
+
+  reset_stage_entry "$name"
+  work_repo=$(stage_repo_dir "$name")
+
+  git clone --depth 1 --branch "$default_branch" "$upstream" "$work_repo"
+  _FORKER_REFERENCE_HEAD_SHA=$(git -C "$work_repo" rev-parse HEAD)
+
+  publish_repo_swap "$name"
+}
+
 load_entry_state() {
   local name="$1"
 
@@ -372,15 +385,14 @@ derive_bootstrap_save_base() {
 
 resolve_conflict() {
   local file="$1" rel_path="$2" old_res="${3:-}"
-  local count work i ours base theirs previous_return_trap
+  local count work i ours base theirs
   local -a sha=() need_coworker=()
 
   count=$(awk 'substr($0,1,7)=="<<<<<<<"{n++} END{print n+0}' "$file")
   [ "$count" -gt 0 ] || { echo "ERROR: no conflict markers in $file" >&2; return 1; }
 
   work=$(mktemp -d)
-  previous_return_trap=$(trap -p RETURN || true)
-  trap "rm -rf '$work'; ${previous_return_trap:-trap - RETURN}" RETURN
+  register_exit_cleanup_dir "$work"
 
   awk -v dir="$work" '
   substr($0,1,7) == "<<<<<<<" { n++; section = "ours"; next }
@@ -701,6 +713,7 @@ upstream_to_pins_workflow() {
     echo >&2
     echo "ERROR: $name has pending work that would be lost." >&2
     echo "Run 'bash $TOOL_REL/wip-to-series.sh $name', 'bash $TOOL_REL/series-to-branch.sh $name', or 'bash $TOOL_REL/rebuild-pins.sh $name' to discard local state." >&2
+    release_entry_lock "$name"
     return 1
   fi
 
@@ -713,10 +726,12 @@ upstream_to_pins_workflow() {
   if ! build_upstream_to_pins_staging "$name" "$preserve_saved_series" "$work_repo" "$work_pin" "$@"; then
     cleanup_stage_entry "$name"
     echo "FAILED: previous state is intact" >&2
+    release_entry_lock "$name"
     return 1
   fi
 
   publish_entry_swap "$name"
+  release_entry_lock "$name"
 
   echo "Pins rebuilt in $name/pin/"
   echo "  BASE=$_FORKER_BUILD_BASE_SHA ($_FORKER_BUILD_DEFAULT_BRANCH)"
@@ -747,6 +762,7 @@ pins_to_wip_workflow() {
   if [ "$check_only" -eq 0 ] && [ -d "$real_repo/.git" ]; then
     if [ "$allow_existing" -eq 0 ]; then
       echo "ERROR: $name clone already exists. Use 'bash $TOOL_REL/rebuild-wip.sh $name' instead." >&2
+      release_entry_lock "$name"
       return 1
     fi
 
@@ -755,6 +771,7 @@ pins_to_wip_workflow() {
       echo >&2
       echo "ERROR: $name has pending work that would be lost." >&2
       echo "Run 'bash $TOOL_REL/wip-to-series.sh $name', 'bash $TOOL_REL/series-to-branch.sh $name', or clean up the clone manually." >&2
+      release_entry_lock "$name"
       return 1
     fi
   fi
@@ -765,16 +782,19 @@ pins_to_wip_workflow() {
   if ! build_pins_to_wip_staging "$name" "$work_repo"; then
     cleanup_stage_entry "$name"
     echo "FAILED: previous state is intact" >&2
+    release_entry_lock "$name"
     return 1
   fi
 
   if [ "$check_only" -eq 1 ]; then
     cleanup_stage_entry "$name"
     echo "OK: wip HEAD matches pinned HEAD ($_FORKER_BUILD_HEAD_SHA)"
+    release_entry_lock "$name"
     return 0
   fi
 
   publish_repo_swap "$name"
+  release_entry_lock "$name"
 
   echo "OK: wip HEAD matches pinned HEAD ($_FORKER_BUILD_HEAD_SHA)"
 }
@@ -794,7 +814,7 @@ rebuild_pins_workflow() {
 
 sync_reference_workflow() {
   local name="$1"
-  local mode upstream real_repo default_branch old_sha new_sha work_repo current_sha detail
+  local mode upstream real_repo default_branch old_sha new_sha current_sha detail
 
   mode=$(entry_mode "$name")
   upstream=$(upstream_url "$name")
@@ -817,13 +837,9 @@ sync_reference_workflow() {
   acquire_entry_lock "$name" || return 1
 
   if [ ! -d "$real_repo/.git" ]; then
-    reset_stage_entry "$name"
-    work_repo=$(stage_repo_dir "$name")
-
-    git clone --depth 1 --branch "$default_branch" "$upstream" "$work_repo"
-    new_sha=$(git -C "$work_repo" rev-parse HEAD)
-
-    publish_repo_swap "$name"
+    rebuild_reference_clone_unlocked "$name" "$upstream" "$default_branch"
+    new_sha="$_FORKER_REFERENCE_HEAD_SHA"
+    release_entry_lock "$name"
 
     _FORKER_SYNC_STATUS="cloned"
     printf '%s\t%s\t-\t%s\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "$new_sha" "$default_branch"
@@ -833,6 +849,7 @@ sync_reference_workflow() {
   if ! reference_clone_is_clean "$real_repo"; then
     current_sha=$(repo_head "$real_repo" 2>/dev/null || printf -- '-')
     _FORKER_SYNC_STATUS="skipped"
+    release_entry_lock "$name"
     printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "$current_sha" "$current_sha" "dirty clone"
     return 0
   fi
@@ -852,7 +869,42 @@ sync_reference_workflow() {
     _FORKER_SYNC_STATUS="updated"
   fi
 
+  release_entry_lock "$name"
   printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "$old_sha" "$new_sha" "$default_branch"
+}
+
+managed_to_reference_workflow() {
+  local name="$1"
+  local upstream default_branch head_sha
+
+  require_managed_entry "$name" || return 1
+  upstream=$(upstream_url "$name")
+
+  default_branch=$(remote_default_branch "$upstream") || default_branch=""
+  if [ -z "$default_branch" ]; then
+    echo "ERROR: cannot resolve remote HEAD for $name." >&2
+    return 1
+  fi
+
+  acquire_entry_lock "$name" || return 1
+
+  if ! managed_clone_is_replaceable "$name"; then
+    state_workflow "$name" >&2 || true
+    echo >&2
+    echo "ERROR: $name has pending work that would be lost." >&2
+    echo "Run 'bash $TOOL_REL/wip-to-series.sh $name', 'bash $TOOL_REL/series-to-branch.sh $name', or clean up the clone manually before converting it to a reference entry." >&2
+    release_entry_lock "$name"
+    return 1
+  fi
+
+  rebuild_reference_clone_unlocked "$name" "$upstream" "$default_branch"
+  head_sha="$_FORKER_REFERENCE_HEAD_SHA"
+
+  rm -rf "$(live_pin_dir "$name")"
+  set_entry_mode_reference "$name"
+  release_entry_lock "$name"
+
+  echo "$name: converted to reference at $head_sha ($default_branch)"
 }
 
 state_workflow() {
@@ -1031,8 +1083,6 @@ wip_to_series_workflow() {
   local mode repo_path pin_path bootstrap=0 current_branch="" pinned_head_sha="" base_commit current_head=""
   local work_dir tmp_repo tmp_pin tmp_series bootstrap_repo bootstrap_pin bootstrap_log
   local before_series_count=0 series_count new_head boot_base_commit
-  local previous_return_trap
-
   mode=$(entry_mode "$name")
   if [ "$mode" != "managed" ]; then
     echo "ERROR: $name is a reference entry. Managed pins are required to save a commit series." >&2
@@ -1046,39 +1096,45 @@ wip_to_series_workflow() {
   if repo_has_worktree_changes "$repo_path"; then
     echo "ERROR: wip-to-series.sh now records committed history only. Commit or stash local changes first." >&2
     show_repo_worktree_changes "$repo_path"
+    release_entry_lock "$name"
     return 1
   fi
 
   current_branch=$(git -C "$repo_path" branch --show-current)
 
   work_dir=$(stage_entry_dir "$name")
-  previous_return_trap=$(trap -p RETURN || true)
-  trap "rm -rf '$work_dir'; ${previous_return_trap:-trap - RETURN}" RETURN
   tmp_repo="$work_dir/repo"
   tmp_pin="$work_dir/pin"
   tmp_series="$work_dir/series"
   mkdir -p "$tmp_pin"
 
   if [ -f "$pin_path/HEAD" ]; then
-    load_pinned_wip_context "$name" repo_path pin_path pinned_head_sha base_commit current_branch current_head || return 1
+    load_pinned_wip_context "$name" repo_path pin_path pinned_head_sha base_commit current_branch current_head || {
+      release_entry_lock "$name"
+      return 1
+    }
     if [ "$current_branch" != "wip" ]; then
       echo "ERROR: Expected to be on 'wip' branch, but on '$current_branch'." >&2
+      release_entry_lock "$name"
       return 1
     fi
 
     if ! head_is_based_on_ref "$repo_path" "$base_commit" "$current_head"; then
       echo "ERROR: wip is not based on the pinned LOCAL_BASE." >&2
       echo "Use 'bash $TOOL_REL/rebuild-wip.sh $name' to reset before saving again." >&2
+      release_entry_lock "$name"
       return 1
     fi
 
     if commit_range_has_merges "$repo_path" "$base_commit" HEAD; then
       echo "ERROR: wip-to-series.sh requires a linear local series after LOCAL_BASE. Cherry-pick merges into plain commits first." >&2
+      release_entry_lock "$name"
       return 1
     fi
 
     if saved_series_matches_ref "$repo_path" "$pin_path" "$current_head"; then
       echo "No changes to save (commit series already matches pins)."
+      release_entry_lock "$name"
       return 0
     fi
 
@@ -1091,6 +1147,7 @@ wip_to_series_workflow() {
     bootstrap_log="$work_dir/bootstrap-upstream-to-pins.log"
 
     if ! derive_bootstrap_save_base "$name" "$repo_path" "$bootstrap_repo" "$bootstrap_pin" "$bootstrap_log" boot_base_commit; then
+      release_entry_lock "$name"
       return 1
     fi
 
@@ -1122,9 +1179,9 @@ wip_to_series_workflow() {
   new_head=$(git -C "$tmp_repo" rev-parse HEAD)
 
   printf '%s\n' "$new_head" > "$tmp_pin/HEAD"
-  rm -rf "$work_dir/series" "$work_dir/bootstrap-repo" "$work_dir/bootstrap-pin" "$work_dir/bootstrap-upstream-to-pins.log" "$work_dir/repo"
 
   publish_pin_swap "$name"
+  release_entry_lock "$name"
 
   if [ "$bootstrap" -eq 1 ] && [ "$series_count" -eq 0 ]; then
     echo "Bootstrapped pins (no local commits to save). Commit $name/pin/ to share."
@@ -1145,8 +1202,6 @@ series_to_branch_workflow() {
   local target="${1:-}" target_start target_work saved_count target_count common_prefix
   local -a wip_commits=() commits_to_push=()
   local commit_count fork_remote
-  local previous_return_trap
-
   mode=$(entry_mode "$name")
   if [ "$mode" != "managed" ]; then
     echo "ERROR: $name is a reference entry and cannot use series-to-branch.sh." >&2
@@ -1154,27 +1209,34 @@ series_to_branch_workflow() {
   fi
 
   acquire_entry_lock "$name" || return 1
-  load_pinned_wip_context "$name" repo_path pin_path pinned_head_sha local_base current_branch current_head || return 1
+  load_pinned_wip_context "$name" repo_path pin_path pinned_head_sha local_base current_branch current_head || {
+    release_entry_lock "$name"
+    return 1
+  }
 
   if [ "$current_branch" != "wip" ]; then
     echo "ERROR: Expected to be on 'wip' branch, but on '$current_branch'." >&2
     echo "Switch back with:  git -C forks/$name/repo checkout wip" >&2
+    release_entry_lock "$name"
     return 1
   fi
 
   if ! head_is_based_on_ref "$repo_path" "$local_base" "$current_head"; then
     echo "ERROR: wip is not based on the pinned LOCAL_BASE." >&2
+    release_entry_lock "$name"
     return 1
   fi
 
   if commit_range_has_merges "$repo_path" "$local_base" "$current_head"; then
     echo "ERROR: series-to-branch.sh requires a linear local series after LOCAL_BASE. Cherry-pick merges into plain commits first." >&2
+    release_entry_lock "$name"
     return 1
   fi
 
   if repo_has_worktree_changes "$repo_path"; then
     echo "ERROR: wip must be clean before running series-to-branch.sh." >&2
     show_repo_worktree_changes "$repo_path"
+    release_entry_lock "$name"
     return 1
   fi
 
@@ -1182,6 +1244,7 @@ series_to_branch_workflow() {
     echo "ERROR: live wip commit series does not match the saved pin series." >&2
     echo "Run 'bash $TOOL_REL/wip-to-series.sh $name' to save changes before pushing." >&2
     echo "  pinned HEAD: $pinned_head_sha" >&2
+    release_entry_lock "$name"
     return 1
   fi
 
@@ -1189,6 +1252,7 @@ series_to_branch_workflow() {
     target=$(git -C "$repo_path" for-each-ref --sort=-committerdate --format='%(refname:short)' 'refs/heads/pr-*' | sed -n '1p')
     if [ -z "$target" ]; then
       echo "ERROR: No target branch. Pass one explicitly, for example 'bash $TOOL_REL/series-to-branch.sh $name pr-123'." >&2
+      release_entry_lock "$name"
       return 1
     fi
   fi
@@ -1201,12 +1265,12 @@ series_to_branch_workflow() {
     target_start="fork/$target"
   else
     echo "ERROR: Target branch '$target' does not exist locally or on origin/fork." >&2
+    release_entry_lock "$name"
     return 1
   fi
 
   target_work=$(mktemp -d)
-  previous_return_trap=$(trap -p RETURN || true)
-  trap "rm -rf '$target_work'; ${previous_return_trap:-trap - RETURN}" RETURN
+  register_exit_cleanup_dir "$target_work"
 
   saved_count=$(saved_series_count "$pin_path")
   target_count=0
@@ -1218,6 +1282,7 @@ series_to_branch_workflow() {
 
     if [ "$target_count" -ne "$common_prefix" ]; then
       echo "ERROR: target branch '$target' diverged from the saved pin series." >&2
+      release_entry_lock "$name"
       return 1
     fi
   fi
@@ -1228,6 +1293,7 @@ series_to_branch_workflow() {
 
   if [ "$saved_count" -eq "$common_prefix" ]; then
     echo "No new commits to push."
+    release_entry_lock "$name"
     return 0
   fi
 
@@ -1243,12 +1309,14 @@ series_to_branch_workflow() {
     echo "  git -C forks/$name/repo cherry-pick --continue" >&2
     echo "  git -C forks/$name/repo cherry-pick --abort" >&2
     echo "When done, return with:  git -C forks/$name/repo checkout wip" >&2
+    release_entry_lock "$name"
     return 1
   fi
 
   git -C "$repo_path" checkout wip >/dev/null 2>&1
 
   fork_remote=$(fork_url "$name" 2>/dev/null) || true
+  release_entry_lock "$name"
 
   echo
   echo "Done. Next steps:"
@@ -1284,13 +1352,53 @@ health_workflow() {
     report_health ERROR "$1" "$2" "${3:-}"
   }
 
-  for tool in git jq; do
+  health_tool() {
+    local tool="$1"
+    local detail_if_missing="$2"
+
     if command -v "$tool" >/dev/null 2>&1; then
       health_ok tool "$tool" available
     else
-      health_error tool "$tool" missing
+      health_error tool "$tool" "$detail_if_missing"
     fi
-  done
+  }
+
+  health_pin_state() {
+    if [ "$mode" = "reference" ]; then
+      if [ "$has_manifest" -eq 1 ] || [ "$has_head" -eq 1 ] || [ "$has_local_base" -eq 1 ] || [ "$saved_series" -gt 0 ]; then
+        health_error pin "$name" reference-entry-has-pins
+      else
+        health_ok pin "$name" no-pins
+      fi
+      return
+    fi
+
+    if [ "$saved_series" -gt 0 ] && [ "$has_manifest" -eq 0 ] && [ "$has_head" -eq 0 ] && [ "$has_local_base" -eq 0 ]; then
+      health_error pin "$name" series-without-base-metadata
+    elif [ "$has_manifest" -ne "$has_head" ] || [ "$has_manifest" -ne "$has_local_base" ]; then
+      health_error pin "$name" manifest-head-local-base-mismatch
+    elif [ "$has_manifest" -eq 1 ]; then
+      health_ok pin "$name" pinned
+    else
+      health_warn pin "$name" managed-without-pins
+    fi
+  }
+
+  health_clone_state() {
+    load_entry_state "$name"
+    if [ "$_FORKER_ENTRY_STATUS" = "missing" ]; then
+      health_warn clone "$name" missing
+    elif [ "$_FORKER_ENTRY_STATUS" = "local-series-has-merges" ]; then
+      health_warn clone "$name" non-linear-local-series
+    elif entry_state_is_safe "$name"; then
+      health_ok clone "$name" safe
+    else
+      health_warn clone "$name" dirty-or-diverged
+    fi
+  }
+
+  health_tool git missing
+  health_tool jq missing
 
   if command -v pnpm >/dev/null 2>&1; then
     health_ok tool pnpm available
@@ -1344,34 +1452,8 @@ health_workflow() {
       continue
     fi
 
-    if [ "$mode" = "reference" ]; then
-      if [ "$has_manifest" -eq 1 ] || [ "$has_head" -eq 1 ] || [ "$has_local_base" -eq 1 ] || [ "$saved_series" -gt 0 ]; then
-        health_error pin "$name" reference-entry-has-pins
-      else
-        health_ok pin "$name" no-pins
-      fi
-    else
-      if [ "$saved_series" -gt 0 ] && [ "$has_manifest" -eq 0 ] && [ "$has_head" -eq 0 ] && [ "$has_local_base" -eq 0 ]; then
-        health_error pin "$name" series-without-base-metadata
-      elif [ "$has_manifest" -ne "$has_head" ] || [ "$has_manifest" -ne "$has_local_base" ]; then
-        health_error pin "$name" manifest-head-local-base-mismatch
-      elif [ "$has_manifest" -eq 1 ]; then
-        health_ok pin "$name" pinned
-      else
-        health_warn pin "$name" managed-without-pins
-      fi
-    fi
-
-    load_entry_state "$name"
-    if [ "$_FORKER_ENTRY_STATUS" = "missing" ]; then
-      health_warn clone "$name" missing
-    elif [ "$_FORKER_ENTRY_STATUS" = "local-series-has-merges" ]; then
-      health_warn clone "$name" non-linear-local-series
-    elif entry_state_is_safe "$name"; then
-      health_ok clone "$name" safe
-    else
-      health_warn clone "$name" dirty-or-diverged
-    fi
+    health_pin_state
+    health_clone_state
   done < <(all_entries)
 
   printf 'summary\tok=%d\twarn=%d\terror=%d\n' "$oks" "$warns" "$errors"

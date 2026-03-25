@@ -125,6 +125,7 @@ create_repo_from_dir() {
 
 IFS=$'\t' read -r REF_WORK REF_BARE <<< "$(create_upstream reference-upstream main)"
 IFS=$'\t' read -r MANAGED_WORK MANAGED_BARE <<< "$(create_upstream managed-upstream main)"
+IFS=$'\t' read -r MERGED_WORK MERGED_BARE <<< "$(create_upstream merged-upstream main)"
 IFS=$'\t' read -r BOOT_WORK BOOT_BARE <<< "$(create_upstream bootstrap-upstream main)"
 IFS=$'\t' read -r BOOT_REFS_WORK BOOT_REFS_BARE <<< "$(create_upstream bootstrap-refs-upstream main)"
 create_branch_commit "$BOOT_REFS_WORK" main feature README.md 'feature branch content'
@@ -133,6 +134,11 @@ cat > "$FORKS_ROOT/config.json" <<JSON
 {
   "managed": {
     "upstream": "file://$MANAGED_BARE",
+    "mode": "managed",
+    "refs": []
+  },
+  "merged": {
+    "upstream": "file://$MERGED_BARE",
     "mode": "managed",
     "refs": []
   },
@@ -157,6 +163,47 @@ run_cmd bash "$FORKER_ROOT/health.sh"
 assert_status 0 "health.sh should succeed on clean test setup"
 assert_contains "$CMD_OUTPUT" $'summary\tok=' "health.sh should print a summary line"
 assert_contains "$CMD_OUTPUT" $'\terror=0' "health.sh should report zero errors"
+assert_contains "$CMD_OUTPUT" $'\twarn=9\t' "health.sh should report the extra managed entry warnings"
+
+run_cmd bash -c 'set -euo pipefail
+source "$1/lib.sh"
+FORKS_DIR="$2"
+acquire_entry_lock managed
+false
+' _ "$FORKER_ROOT" "$FORKS_ROOT"
+assert_status 1 "acquire_entry_lock should still release the lock on shell exit"
+[ ! -d "$FORKS_ROOT/.lock/managed.lock" ] || fail "acquire_entry_lock should not leak locks after set -e exits"
+
+run_cmd bash -c 'set -euo pipefail
+source "$1/lib.sh"
+FORKS_DIR="$2"
+acquire_entry_lock managed
+release_entry_lock managed
+mkdir -p "$(entry_lock_dir managed)"
+' _ "$FORKER_ROOT" "$FORKS_ROOT"
+assert_status 0 "release_entry_lock should succeed before shell exit"
+[ -d "$FORKS_ROOT/.lock/managed.lock" ] || fail "release_entry_lock should unregister EXIT cleanup before another process reacquires the lock"
+rm -rf "$FORKS_ROOT/.lock/managed.lock"
+
+run_cmd bash -c 'set -euo pipefail
+source "$1/lib.sh"
+FORKS_DIR="$2"
+reset_stage_entry managed
+false
+' _ "$FORKER_ROOT" "$FORKS_ROOT"
+assert_status 1 "reset_stage_entry should still clean staged entries on shell exit"
+[ ! -d "$FORKS_ROOT/.stage/managed" ] || fail "reset_stage_entry should not leak staged entries after set -e exits"
+
+run_cmd bash -c 'set -euo pipefail
+source "$1/lib.sh"
+FORKS_DIR="$2"
+reset_stage_entry managed
+cleanup_stage_entry managed
+mkdir -p "$(stage_entry_dir managed)"
+' _ "$FORKER_ROOT" "$FORKS_ROOT"
+assert_status 0 "cleanup_stage_entry should succeed before shell exit"
+[ -d "$FORKS_ROOT/.stage/managed" ] || fail "cleanup_stage_entry should unregister EXIT cleanup before staged entries are recreated"
+rm -rf "$FORKS_ROOT/.stage/managed"
 
 BOOTSTRAP_WORKSPACE_ROOT="$ROOT/bootstrap-workspace"
 BOOTSTRAP_WORKSPACE_FORKS="$BOOTSTRAP_WORKSPACE_ROOT/forks"
@@ -294,6 +341,26 @@ assert_contains "$CMD_OUTPUT" $'summary\tupdated=0\tcloned=0\tunchanged=1\tskipp
 run_cmd bash "$FORKER_ROOT/upstream-to-pins.sh" managed
 assert_status 0 "upstream-to-pins.sh should bootstrap a managed entry with no refs"
 assert_contains "$CMD_OUTPUT" 'Pins rebuilt in managed/pin/' "upstream-to-pins.sh should write managed pins"
+
+run_cmd bash "$FORKER_ROOT/upstream-to-pins.sh" merged
+assert_status 0 "upstream-to-pins.sh should bootstrap a disposable managed entry for conversion"
+assert_contains "$CMD_OUTPUT" 'Pins rebuilt in merged/pin/' "upstream-to-pins.sh should write pins before converting to reference"
+
+run_cmd bash "$FORKER_ROOT/managed-to-reference.sh" merged
+assert_status 0 "managed-to-reference.sh should convert a managed entry back to reference mode"
+assert_contains "$CMD_OUTPUT" 'merged: converted to reference at ' "managed-to-reference.sh should report the rebuilt reference clone"
+assert_equals "$(jq -r '.merged.mode' "$FORKS_ROOT/config.json")" 'reference' "managed-to-reference.sh should rewrite config mode"
+[ ! -d "$FORKS_ROOT/merged/pin" ] || fail "managed-to-reference.sh should remove managed pin state"
+assert_equals "$(git -C "$FORKS_ROOT/merged/repo" branch --show-current)" 'main' "managed-to-reference.sh should leave a reference clone on the default branch"
+assert_equals "$(git -C "$FORKS_ROOT/merged/repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}')" 'origin/main' "managed-to-reference.sh should track the upstream default branch"
+
+run_cmd bash "$FORKER_ROOT/state.sh" merged
+assert_status 0 "state.sh should treat a converted entry as a clean reference clone"
+assert_contains "$CMD_OUTPUT" 'reference clone matches origin/main' "state.sh should report the converted entry as reference-clean"
+
+run_cmd bash "$FORKER_ROOT/upstream-to-pins.sh" merged
+assert_status 1 "upstream-to-pins.sh should reject entries converted back to reference mode"
+assert_contains "$CMD_OUTPUT" "Use 'bash forks/phroi_forker/repo/sync-reference.sh merged'." "managed workflows should redirect converted entries to sync-reference.sh"
 
 mkdir -p "$FORKS_ROOT/bootstrap"
 git clone --quiet --branch main "file://$BOOT_BARE" "$FORKS_ROOT/bootstrap/repo"

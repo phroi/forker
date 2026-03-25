@@ -15,6 +15,20 @@ config_val() {
   jq -r ".[\"$1\"] | $2" "$FORKS_DIR/config.json"
 }
 
+write_config_json() {
+  local tmp
+
+  tmp=$(mktemp "$FORKS_DIR/config.json.tmp.XXXXXX")
+  cat > "$tmp"
+  mv "$tmp" "$FORKS_DIR/config.json"
+}
+
+set_entry_mode_reference() {
+  local name="$1"
+
+  jq --arg name "$name" '.[$name] |= (.mode = "reference" | del(.refs, .fork))' "$FORKS_DIR/config.json" | write_config_json
+}
+
 entry_mode() {
   config_val "$1" '.mode'
 }
@@ -62,9 +76,56 @@ supports_mv_exchange() {
   esac
 }
 
+declare -a _FORKER_EXIT_RM_RF=()
+_FORKER_EXIT_TRAP_SET=0
+
+run_exit_cleanups() {
+  local idx
+
+  for ((idx = ${#_FORKER_EXIT_RM_RF[@]} - 1; idx >= 0; idx--)); do
+    rm -rf "${_FORKER_EXIT_RM_RF[$idx]}"
+  done
+}
+
+unregister_exit_cleanup_dir() {
+  local path="$1"
+  local existing
+  local -a keep=()
+
+  for existing in "${_FORKER_EXIT_RM_RF[@]}"; do
+    [ "$existing" = "$path" ] || keep+=("$existing")
+  done
+
+  _FORKER_EXIT_RM_RF=("${keep[@]}")
+}
+
+register_exit_cleanup_dir() {
+  if [ "${_FORKER_EXIT_TRAP_SET:-0}" -eq 0 ]; then
+    trap run_exit_cleanups EXIT
+    _FORKER_EXIT_TRAP_SET=1
+  fi
+
+  _FORKER_EXIT_RM_RF+=("$1")
+}
+
+release_entry_lock() {
+  local lock_dir tmp_lock
+
+  lock_dir=$(entry_lock_dir "$1")
+  tmp_lock="$lock_dir.releasing.$$"
+
+  # Move the lock out of its well-known path before cleanup so another process
+  # can reacquire safely while EXIT cleanup still owns any leftover removal.
+  register_exit_cleanup_dir "$tmp_lock"
+  mv "$lock_dir" "$tmp_lock"
+  unregister_exit_cleanup_dir "$lock_dir"
+  rm -rf "$tmp_lock"
+  unregister_exit_cleanup_dir "$tmp_lock"
+}
+
 acquire_entry_lock() {
   local name="$1"
-  local lock_dir previous_return_trap
+  local lock_dir
 
   mkdir -p "$(lock_root_dir)"
   lock_dir=$(entry_lock_dir "$name")
@@ -73,9 +134,7 @@ acquire_entry_lock() {
     return 1
   fi
 
-  # `trap -p RETURN` returns a full trap command, so chain it verbatim.
-  previous_return_trap=$(trap -p RETURN || true)
-  trap "rm -rf '$lock_dir'; ${previous_return_trap:-trap - RETURN}" RETURN
+  register_exit_cleanup_dir "$lock_dir"
 }
 
 reset_stage_entry() {
@@ -83,12 +142,18 @@ reset_stage_entry() {
   local stage_entry
 
   stage_entry=$(stage_entry_dir "$name")
+  unregister_exit_cleanup_dir "$stage_entry"
   rm -rf "$stage_entry"
   mkdir -p "$stage_entry"
+  register_exit_cleanup_dir "$stage_entry"
 }
 
 cleanup_stage_entry() {
-  rm -rf "$(stage_entry_dir "$1")"
+  local stage_entry
+
+  stage_entry=$(stage_entry_dir "$1")
+  rm -rf "$stage_entry"
+  unregister_exit_cleanup_dir "$stage_entry"
 }
 
 publish_dir_swap() {
@@ -354,12 +419,11 @@ saved_series_matches_ref() {
   local repo_dir="$1"
   local pin_dir="$2"
   local end_ref="${3:-HEAD}"
-  local base_ref tmp_dir saved_dir previous_return_trap
+  local base_ref tmp_dir saved_dir
 
   base_ref=$(local_base "$pin_dir") || return 1
   tmp_dir=$(mktemp -d)
-  previous_return_trap=$(trap -p RETURN || true)
-  trap "rm -rf '$tmp_dir'; ${previous_return_trap:-trap - RETURN}" RETURN
+  register_exit_cleanup_dir "$tmp_dir"
   saved_dir=$(series_dir "$pin_dir")
 
   export_commit_series "$repo_dir" "$base_ref" "$end_ref" "$tmp_dir/live" || return 1
@@ -535,11 +599,10 @@ apply_counted_resolutions() {
 apply_resolution_file() {
   local repo_dir="$1" res_file="$2"
   local tmp_dir
-  local i=0 path previous_return_trap
+  local i=0 path
 
   tmp_dir=$(mktemp -d)
-  previous_return_trap=$(trap -p RETURN || true)
-  trap "rm -rf '$tmp_dir'; ${previous_return_trap:-trap - RETURN}" RETURN
+  register_exit_cleanup_dir "$tmp_dir"
 
   # Split a multi-file resolution sidecar into per-file chunks, then feed each
   # chunk back through apply_counted_resolutions for positional reconstruction.
