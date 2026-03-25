@@ -5,8 +5,7 @@ source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 source "$FORKER_DIR/workflow-lib.sh"
 
 main() {
-  local name="${1:?Usage: $TOOL_REL/verify-pins.sh <name>}"
-  verify_pins_workflow "$name"
+  sync_all_references_workflow
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
