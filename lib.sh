@@ -4,8 +4,9 @@
 # config access, pin/clone path resolution, and deterministic replay helpers.
 
 FORKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FORKS_DIR="$(cd "$FORKER_DIR/.." && pwd)"
-TOOL_REL="forks/$(basename "$FORKER_DIR")"
+ENTRY_DIR="$(cd "$FORKER_DIR/.." && pwd)"
+FORKS_DIR="$(cd "$ENTRY_DIR/.." && pwd)"
+TOOL_REL="forks/$(basename "$ENTRY_DIR")/repo"
 ROOT_DIR="$(cd "$FORKS_DIR/.." && pwd)"
 PACKAGE_ROOT="${FORKER_PACKAGE_ROOT:-$ROOT_DIR}"
 
@@ -14,27 +15,187 @@ config_val() {
   jq -r ".[\"$1\"] | $2" "$FORKS_DIR/config.json"
 }
 
+write_config_json() {
+  local tmp
+
+  tmp=$(mktemp "$FORKS_DIR/config.json.tmp.XXXXXX")
+  cat > "$tmp"
+  mv "$tmp" "$FORKS_DIR/config.json"
+}
+
+set_entry_mode_reference() {
+  local name="$1"
+
+  jq --arg name "$name" '.[$name] |= (.mode = "reference" | del(.refs, .fork))' "$FORKS_DIR/config.json" | write_config_json
+}
+
 entry_mode() {
   config_val "$1" '.mode'
 }
 
-repo_dir() {
-  # Workflows that stage a rebuilt clone can override the live repo path with
-  # _FORKER_WORK_REPO so helpers keep targeting the staging area.
-  if [ -n "${_FORKER_WORK_REPO:-}" ]; then
-    echo "$_FORKER_WORK_REPO"
+live_repo_dir() {
+  echo "$FORKS_DIR/$1/repo"
+}
+
+live_pin_dir() {
+  echo "$FORKS_DIR/$1/pin"
+}
+
+entry_dir() {
+  echo "$FORKS_DIR/$1"
+}
+
+stage_root_dir() {
+  echo "$FORKS_DIR/.stage"
+}
+
+stage_entry_dir() {
+  echo "$(stage_root_dir)/$1"
+}
+
+stage_repo_dir() {
+  echo "$(stage_entry_dir "$1")/repo"
+}
+
+stage_pin_dir() {
+  echo "$(stage_entry_dir "$1")/pin"
+}
+
+lock_root_dir() {
+  echo "$FORKS_DIR/.lock"
+}
+
+entry_lock_dir() {
+  echo "$(lock_root_dir)/$1.lock"
+}
+
+supports_mv_exchange() {
+  case "$(mv --help 2>&1)" in
+    *--exchange*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+declare -a _FORKER_EXIT_RM_RF=()
+_FORKER_EXIT_TRAP_SET=0
+
+run_exit_cleanups() {
+  local idx
+
+  for ((idx = ${#_FORKER_EXIT_RM_RF[@]} - 1; idx >= 0; idx--)); do
+    rm -rf "${_FORKER_EXIT_RM_RF[$idx]}"
+  done
+}
+
+unregister_exit_cleanup_dir() {
+  local path="$1"
+  local existing
+  local -a keep=()
+
+  for existing in "${_FORKER_EXIT_RM_RF[@]}"; do
+    [ "$existing" = "$path" ] || keep+=("$existing")
+  done
+
+  _FORKER_EXIT_RM_RF=("${keep[@]}")
+}
+
+register_exit_cleanup_dir() {
+  if [ "${_FORKER_EXIT_TRAP_SET:-0}" -eq 0 ]; then
+    trap run_exit_cleanups EXIT
+    _FORKER_EXIT_TRAP_SET=1
+  fi
+
+  _FORKER_EXIT_RM_RF+=("$1")
+}
+
+release_entry_lock() {
+  local lock_dir tmp_lock
+
+  lock_dir=$(entry_lock_dir "$1")
+  tmp_lock="$lock_dir.releasing.$$"
+
+  # Move the lock out of its well-known path before cleanup so another process
+  # can reacquire safely while EXIT cleanup still owns any leftover removal.
+  register_exit_cleanup_dir "$tmp_lock"
+  mv "$lock_dir" "$tmp_lock"
+  unregister_exit_cleanup_dir "$lock_dir"
+  rm -rf "$tmp_lock"
+  unregister_exit_cleanup_dir "$tmp_lock"
+}
+
+acquire_entry_lock() {
+  local name="$1"
+  local lock_dir
+
+  mkdir -p "$(lock_root_dir)"
+  lock_dir=$(entry_lock_dir "$name")
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    echo "ERROR: $name is already being modified by another forker command." >&2
+    return 1
+  fi
+
+  register_exit_cleanup_dir "$lock_dir"
+}
+
+reset_stage_entry() {
+  local name="$1"
+  local stage_entry
+
+  stage_entry=$(stage_entry_dir "$name")
+  unregister_exit_cleanup_dir "$stage_entry"
+  rm -rf "$stage_entry"
+  mkdir -p "$stage_entry"
+  register_exit_cleanup_dir "$stage_entry"
+}
+
+cleanup_stage_entry() {
+  local stage_entry
+
+  stage_entry=$(stage_entry_dir "$1")
+  rm -rf "$stage_entry"
+  unregister_exit_cleanup_dir "$stage_entry"
+}
+
+publish_dir_swap() {
+  local staged="$1"
+  local live="$2"
+  local live_parent
+
+  # Swap staged and live in one step so readers see old or new, not half-published state.
+  live_parent=$(dirname "$live")
+  mkdir -p "$live_parent"
+
+  if [ -e "$live" ]; then
+    if ! supports_mv_exchange; then
+      echo "ERROR: mv --exchange is required to swap existing directories safely." >&2
+      return 1
+    fi
+    mv -T --exchange "$staged" "$live"
   else
-    echo "$FORKS_DIR/$1"
+    mv -T "$staged" "$live"
   fi
 }
 
-pin_dir() {
-  # Like repo_dir(), but for staged pin writes before the final atomic move.
-  if [ -n "${_FORKER_WORK_PIN:-}" ]; then
-    echo "$_FORKER_WORK_PIN"
-  else
-    echo "$FORKS_DIR/.pin/$1"
-  fi
+publish_repo_swap() {
+  local name="$1"
+
+  publish_dir_swap "$(stage_repo_dir "$name")" "$(live_repo_dir "$name")"
+  cleanup_stage_entry "$name"
+}
+
+publish_pin_swap() {
+  local name="$1"
+
+  publish_dir_swap "$(stage_pin_dir "$name")" "$(live_pin_dir "$name")"
+  cleanup_stage_entry "$name"
+}
+
+publish_entry_swap() {
+  local name="$1"
+
+  # Swap the whole entry root so repo and pin move together as one generation.
+  publish_dir_swap "$(stage_entry_dir "$name")" "$(entry_dir "$name")"
+  cleanup_stage_entry "$name"
 }
 
 upstream_url() {
@@ -53,18 +214,6 @@ fork_url() {
 
 repo_refs() {
   config_val "$1" '(.refs // [])[]'
-}
-
-discover_forks() {
-  # Historical name retained for callers that expect the tool repo itself to be
-  # excluded from batch operations.
-  batch_entries
-}
-
-batch_entries() {
-  local tool_name
-  tool_name=$(basename "$FORKER_DIR")
-  jq -r --arg skip "$tool_name" 'keys[] | select(. != $skip)' "$FORKS_DIR/config.json"
 }
 
 all_entries() {
@@ -93,16 +242,6 @@ manifest_file() {
   [ -f "$f" ] && echo "$f" || return 1
 }
 
-has_pin() {
-  [ -f "$1/manifest" ]
-}
-
-merge_count() {
-  local mf
-  mf=$(manifest_file "$1") || return 1
-  echo $(( $(wc -l < "$mf") - 1 ))
-}
-
 deterministic_env() {
   # Replay and record use synthetic commit metadata so the same inputs produce
   # byte-identical commits and stable HEAD pins.
@@ -118,6 +257,11 @@ count_glob() {
     [ -f "$f" ] && n=$((n + 1))
   done
   echo "$n"
+}
+
+file_line_count() {
+  # `wc -l` undercounts files without a trailing newline.
+  awk 'END { print NR }' "$1"
 }
 
 series_dir() {
@@ -258,7 +402,7 @@ series_prefix_length() {
     limit=${#right_list[@]}
   fi
 
-  # Count the longest common prefix, not just equality, so push.sh can resume
+  # Count the longest common prefix, not just equality, so series-to-branch.sh can resume
   # from a partially pushed series without re-cherry-picking earlier commits.
   for ((idx = 0; idx < limit; idx++)); do
     if cmp -s <(normalize_patch_stream "${left_list[$idx]}") <(normalize_patch_stream "${right_list[$idx]}"); then
@@ -279,7 +423,7 @@ saved_series_matches_ref() {
 
   base_ref=$(local_base "$pin_dir") || return 1
   tmp_dir=$(mktemp -d)
-  trap 'rm -rf "$tmp_dir"' RETURN
+  register_exit_cleanup_dir "$tmp_dir"
   saved_dir=$(series_dir "$pin_dir")
 
   export_commit_series "$repo_dir" "$base_ref" "$end_ref" "$tmp_dir/live" || return 1
@@ -324,6 +468,7 @@ repo_has_stash() {
 }
 
 repo_has_worktree_changes() {
+  # Stash counts as unsafe local state too. Rebuild/save workflows must not hide it.
   ! git -C "$1" diff --quiet 2>/dev/null \
     || ! git -C "$1" diff --cached --quiet 2>/dev/null \
     || repo_has_untracked "$1" \
@@ -365,12 +510,6 @@ ref_label() {
       echo "$1"
       ;;
   esac
-}
-
-reference_baseline_label() {
-  local ref
-  ref=$(reference_baseline_ref "$1") || return 1
-  ref_label "$ref"
 }
 
 local_origin_head_sha() {
@@ -463,7 +602,7 @@ apply_resolution_file() {
   local i=0 path
 
   tmp_dir=$(mktemp -d)
-  trap 'rm -rf "$tmp_dir"' RETURN
+  register_exit_cleanup_dir "$tmp_dir"
 
   # Split a multi-file resolution sidecar into per-file chunks, then feed each
   # chunk back through apply_counted_resolutions for positional reconstruction.
