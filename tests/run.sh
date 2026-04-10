@@ -2,11 +2,23 @@
 set -euo pipefail
 
 ROOT=$(mktemp -d)
-trap 'rm -rf "$ROOT"' EXIT
+trap 'chmod -R u+w "$ROOT" 2>/dev/null || true; rm -rf "$ROOT"' EXIT
 
 TEST_ROOT="$ROOT/work"
 FORKS_ROOT="$TEST_ROOT/forks"
 FORKER_ROOT="$FORKS_ROOT/phroi_forker/repo"
+
+NEXT_GIT_TIMESTAMP=1700000000
+
+git_commit_with_next_timestamp() {
+  local repo="$1"
+  shift
+  local ts="$NEXT_GIT_TIMESTAMP"
+  NEXT_GIT_TIMESTAMP=$((NEXT_GIT_TIMESTAMP + 60))
+
+  GIT_AUTHOR_DATE="@$ts +0000" GIT_COMMITTER_DATE="@$ts +0000" \
+    git -C "$repo" commit "$@"
+}
 
 mkdir -p "$FORKER_ROOT"
 SOURCE_FORKER="$(cd "$(dirname "$0")/.." && pwd)"
@@ -59,7 +71,7 @@ create_upstream() {
   git -C "$work" config user.name ci
   printf '%s\n' "$name base" > "$work/README.md"
   git -C "$work" add README.md
-  git -C "$work" commit -m "init" >/dev/null 2>&1
+  git_commit_with_next_timestamp "$work" -m "init" >/dev/null 2>&1
   git -C "$work" branch -M "$branch"
 
   git init --bare "$bare" >/dev/null 2>&1
@@ -78,7 +90,7 @@ append_commit() {
 
   printf '%s\n' "$text" >> "$work/$file"
   git -C "$work" add "$file"
-  git -C "$work" commit -m "update $file" >/dev/null 2>&1
+  git_commit_with_next_timestamp "$work" -m "update $file" >/dev/null 2>&1
   git -C "$work" push origin "$branch" >/dev/null 2>&1
 }
 
@@ -92,7 +104,7 @@ create_branch_commit() {
   git -C "$work" checkout -b "$new_branch" "$base_branch" >/dev/null 2>&1
   printf '%s\n' "$text" >> "$work/$file"
   git -C "$work" add "$file"
-  git -C "$work" commit -m "branch $new_branch" >/dev/null 2>&1
+  git_commit_with_next_timestamp "$work" -m "branch $new_branch" >/dev/null 2>&1
   git -C "$work" push -u origin "$new_branch" >/dev/null 2>&1
   git -C "$work" checkout "$base_branch" >/dev/null 2>&1
 }
@@ -112,7 +124,7 @@ create_repo_from_dir() {
   git -C "$work" config user.email ci@example.com
   git -C "$work" config user.name ci
   git -C "$work" add .
-  git -C "$work" commit -m "init" >/dev/null 2>&1
+  git_commit_with_next_timestamp "$work" -m "init" >/dev/null 2>&1
   git -C "$work" branch -M "$branch"
 
   git init --bare "$bare" >/dev/null 2>&1
@@ -128,7 +140,11 @@ IFS=$'\t' read -r MANAGED_WORK MANAGED_BARE <<< "$(create_upstream managed-upstr
 IFS=$'\t' read -r MERGED_WORK MERGED_BARE <<< "$(create_upstream merged-upstream main)"
 IFS=$'\t' read -r BOOT_WORK BOOT_BARE <<< "$(create_upstream bootstrap-upstream main)"
 IFS=$'\t' read -r BOOT_REFS_WORK BOOT_REFS_BARE <<< "$(create_upstream bootstrap-refs-upstream main)"
+IFS=$'\t' read -r BRANCHY_REF_WORK BRANCHY_REF_BARE <<< "$(create_upstream branchy-reference-upstream main)"
+IFS=$'\t' read -r CONVERT_REF_WORK CONVERT_REF_BARE <<< "$(create_upstream convertible-reference-upstream main)"
 create_branch_commit "$BOOT_REFS_WORK" main feature README.md 'feature branch content'
+create_branch_commit "$BRANCHY_REF_WORK" main dev README.md 'branchy dev content'
+create_branch_commit "$CONVERT_REF_WORK" main dev README.md 'convertible dev content'
 
 cat > "$FORKS_ROOT/config.json" <<JSON
 {
@@ -155,6 +171,14 @@ cat > "$FORKS_ROOT/config.json" <<JSON
   "reference": {
     "upstream": "file://$REF_BARE",
     "mode": "reference"
+  },
+  "branchy_reference": {
+    "upstream": "file://$BRANCHY_REF_BARE",
+    "mode": "reference"
+  },
+  "convertible_reference": {
+    "upstream": "file://$CONVERT_REF_BARE",
+    "mode": "reference"
   }
 }
 JSON
@@ -163,7 +187,7 @@ run_cmd bash "$FORKER_ROOT/health.sh"
 assert_status 0 "health.sh should succeed on clean test setup"
 assert_contains "$CMD_OUTPUT" $'summary\tok=' "health.sh should print a summary line"
 assert_contains "$CMD_OUTPUT" $'\terror=0' "health.sh should report zero errors"
-assert_contains "$CMD_OUTPUT" $'\twarn=9\t' "health.sh should report the extra managed entry warnings"
+assert_contains "$CMD_OUTPUT" $'\twarn=11\t' "health.sh should report the extra managed entry warnings"
 
 run_cmd bash -c 'set -euo pipefail
 source "$1/lib.sh"
@@ -309,22 +333,14 @@ assert_contains "$CMD_OUTPUT" $'reference\tcloned\t-\t' "sync-reference.sh shoul
 
 run_cmd bash "$FORKER_ROOT/state.sh" reference
 assert_status 0 "state.sh should accept a clean reference clone"
-assert_contains "$CMD_OUTPUT" 'reference clone matches' "state.sh should report a clean reference clone"
+[ ! -w "$FORKS_ROOT/reference/repo/README.md" ] || fail "sync-reference.sh should leave reference clones read-only"
+assert_contains "$CMD_OUTPUT" 'reference clone matches primary origin/main' "state.sh should report a clean reference clone"
+assert_contains "$CMD_OUTPUT" 'readonly     yes' "state.sh should report read-only reference clones"
 
 run_cmd bash "$FORKER_ROOT/rebuild-pins.sh" reference
 assert_status 1 "rebuild-pins.sh should refuse reference entries"
 assert_contains "$CMD_OUTPUT" "Use 'bash forks/phroi_forker/repo/sync-reference.sh reference'." "rebuild-pins.sh should explain its reference-entry scope"
 
-printf '%s\n' 'dirty change' >> "$FORKS_ROOT/reference/repo/README.md"
-run_cmd bash "$FORKER_ROOT/state.sh" reference
-assert_status 1 "state.sh should reject a dirty reference clone"
-assert_contains "$CMD_OUTPUT" 'changes relative to' "dirty reference status should explain why"
-
-run_cmd bash "$FORKER_ROOT/sync-reference.sh" reference
-assert_status 0 "sync-reference.sh should skip a dirty reference clone without failing"
-assert_contains "$CMD_OUTPUT" $'reference\tskipped\t' "sync-reference.sh should report a skipped dirty clone"
-
-git -C "$FORKS_ROOT/reference/repo" checkout -- README.md >/dev/null 2>&1
 append_commit "$REF_WORK" main README.md 'remote update'
 
 OLD_REF_SHA=$(git -C "$FORKS_ROOT/reference/repo" rev-parse HEAD)
@@ -333,10 +349,72 @@ assert_status 0 "sync-reference.sh should refresh a clean reference clone"
 assert_contains "$CMD_OUTPUT" $'reference\tupdated\t' "sync-reference.sh should report an update"
 NEW_REF_SHA=$(git -C "$FORKS_ROOT/reference/repo" rev-parse HEAD)
 [ "$OLD_REF_SHA" != "$NEW_REF_SHA" ] || fail "reference clone should move to a new commit"
+[ ! -w "$FORKS_ROOT/reference/repo/README.md" ] || fail "sync-reference.sh should relock reference clones after updating"
+
+chmod -R u+w "$FORKS_ROOT/reference/repo"
+printf '%s\n' 'stash-only change' >> "$FORKS_ROOT/reference/repo/README.md"
+git -C "$FORKS_ROOT/reference/repo" stash push --include-untracked -m temp >/dev/null 2>&1
+run_cmd bash "$FORKER_ROOT/sync-reference.sh" reference
+assert_status 0 "sync-reference.sh should ignore stash-only drift in reference clones"
+assert_contains "$CMD_OUTPUT" $'reference\tupdated\t' "sync-reference.sh should relock a writable reference clone"
+[ -n "$(git -C "$FORKS_ROOT/reference/repo" stash list)" ] || fail "sync-reference.sh should preserve reference stashes"
+[ ! -w "$FORKS_ROOT/reference/repo/README.md" ] || fail "sync-reference.sh should relock a stashed reference clone"
+
+run_cmd bash "$FORKER_ROOT/sync-reference.sh" branchy_reference
+assert_status 0 "sync-reference.sh should clone a multi-branch reference entry"
+assert_contains "$CMD_OUTPUT" $'branchy_reference\tcloned\t-\t' "sync-reference.sh should report a clone for multi-branch references"
+assert_equals "$(git -C "$FORKS_ROOT/branchy_reference/repo" branch --show-current)" 'dev' "sync-reference.sh should check out the newest mirrored branch"
+
+run_cmd bash "$FORKER_ROOT/state.sh" branchy_reference
+assert_status 0 "state.sh should accept a clean multi-branch reference clone"
+assert_contains "$CMD_OUTPUT" 'reference clone matches primary origin/dev' "state.sh should report the derived primary branch"
+assert_contains "$CMD_OUTPUT" 'remote_head  origin/main' "state.sh should report the upstream remote HEAD separately"
+
+chmod -R u+w "$FORKS_ROOT/branchy_reference/repo"
+run_cmd bash "$FORKER_ROOT/state.sh" branchy_reference
+assert_status 1 "state.sh should reject writable reference clones"
+assert_contains "$CMD_OUTPUT" 'reference clone is writable but should be read-only' "state.sh should explain writable reference drift"
+
+printf '%s\n' 'manual override change' >> "$FORKS_ROOT/branchy_reference/repo/README.md"
+touch "$FORKS_ROOT/branchy_reference/repo/extra.tmp"
+run_cmd bash "$FORKER_ROOT/sync-reference.sh" branchy_reference
+assert_status 0 "sync-reference.sh should discard local reference worktree drift"
+assert_contains "$CMD_OUTPUT" $'branchy_reference\tupdated\t' "sync-reference.sh should report resetting reference drift"
+[ ! -e "$FORKS_ROOT/branchy_reference/repo/extra.tmp" ] || fail "sync-reference.sh should remove untracked files from reference clones"
+[ ! -w "$FORKS_ROOT/branchy_reference/repo/README.md" ] || fail "sync-reference.sh should relock reference clones after discarding drift"
+
+append_commit "$BRANCHY_REF_WORK" main README.md 'branchy main hotfix'
+run_cmd bash "$FORKER_ROOT/sync-reference.sh" branchy_reference
+assert_status 0 "sync-reference.sh should refresh the primary branch when another branch becomes newer"
+assert_contains "$CMD_OUTPUT" $'branchy_reference\tupdated\t' "sync-reference.sh should report primary branch changes"
+assert_equals "$(git -C "$FORKS_ROOT/branchy_reference/repo" branch --show-current)" 'main' "sync-reference.sh should switch to the newest mirrored branch"
+
+run_cmd bash "$FORKER_ROOT/state.sh" branchy_reference
+assert_status 0 "state.sh should accept a refreshed multi-branch reference clone"
+assert_contains "$CMD_OUTPUT" 'reference clone matches primary origin/main' "state.sh should track the new primary branch"
+
+run_cmd bash "$FORKER_ROOT/sync-reference.sh" convertible_reference
+assert_status 0 "sync-reference.sh should clone a convertible reference entry"
+assert_equals "$(git -C "$FORKS_ROOT/convertible_reference/repo" branch --show-current)" 'dev' "sync-reference.sh should start convertible references on their newest branch"
 
 run_cmd bash "$FORKER_ROOT/sync-all-references.sh"
 assert_status 0 "sync-all-references.sh should complete when entries are healthy"
-assert_contains "$CMD_OUTPUT" $'summary\tupdated=0\tcloned=0\tunchanged=1\tskipped=0\tfailed=0' "sync-all-references.sh should print an aggregate summary"
+assert_contains "$CMD_OUTPUT" $'summary\tupdated=0\tcloned=0\tunchanged=3\tskipped=0\tfailed=0' "sync-all-references.sh should print an aggregate summary"
+
+run_cmd bash "$FORKER_ROOT/reference-to-managed.sh" convertible_reference
+assert_status 0 "reference-to-managed.sh should convert a reference entry into a managed clone"
+assert_contains "$CMD_OUTPUT" 'convertible_reference: converted to managed with base_branch=dev' "reference-to-managed.sh should preserve the current reference primary branch"
+assert_equals "$(jq -r '.convertible_reference.mode' "$FORKS_ROOT/config.json")" 'managed' "reference-to-managed.sh should rewrite config mode"
+assert_equals "$(jq -r '.convertible_reference.base_branch' "$FORKS_ROOT/config.json")" 'dev' "reference-to-managed.sh should record the managed base branch"
+assert_equals "$(jq -c '.convertible_reference.refs' "$FORKS_ROOT/config.json")" '[]' "reference-to-managed.sh should not invent managed merge refs"
+[ -d "$FORKS_ROOT/convertible_reference/pin" ] || fail "reference-to-managed.sh should create pin state"
+assert_equals "$(git -C "$FORKS_ROOT/convertible_reference/repo" branch --show-current)" 'wip' "reference-to-managed.sh should leave a writable managed wip clone"
+[ -w "$FORKS_ROOT/convertible_reference/repo/README.md" ] || fail "reference-to-managed.sh should leave managed clones writable"
+assert_contains "$(cat "$FORKS_ROOT/convertible_reference/repo/README.md")" 'convertible dev content' "reference-to-managed.sh should preserve the current reference content"
+
+run_cmd bash "$FORKER_ROOT/state.sh" convertible_reference
+assert_status 0 "state.sh should treat a converted managed entry as pinned"
+assert_contains "$CMD_OUTPUT" 'wip matches pins' "state.sh should report the converted managed entry as pinned"
 
 run_cmd bash "$FORKER_ROOT/upstream-to-pins.sh" managed
 assert_status 0 "upstream-to-pins.sh should bootstrap a managed entry with no refs"
@@ -353,10 +431,12 @@ assert_equals "$(jq -r '.merged.mode' "$FORKS_ROOT/config.json")" 'reference' "m
 [ ! -d "$FORKS_ROOT/merged/pin" ] || fail "managed-to-reference.sh should remove managed pin state"
 assert_equals "$(git -C "$FORKS_ROOT/merged/repo" branch --show-current)" 'main' "managed-to-reference.sh should leave a reference clone on the default branch"
 assert_equals "$(git -C "$FORKS_ROOT/merged/repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}')" 'origin/main' "managed-to-reference.sh should track the upstream default branch"
+[ ! -w "$FORKS_ROOT/merged/repo/README.md" ] || fail "managed-to-reference.sh should relock converted reference clones"
 
 run_cmd bash "$FORKER_ROOT/state.sh" merged
 assert_status 0 "state.sh should treat a converted entry as a clean reference clone"
-assert_contains "$CMD_OUTPUT" 'reference clone matches origin/main' "state.sh should report the converted entry as reference-clean"
+assert_contains "$CMD_OUTPUT" 'reference clone matches primary origin/main' "state.sh should report the converted entry as reference-clean"
+assert_contains "$CMD_OUTPUT" 'readonly     yes' "state.sh should report converted reference clones as read-only"
 
 run_cmd bash "$FORKER_ROOT/upstream-to-pins.sh" merged
 assert_status 1 "upstream-to-pins.sh should reject entries converted back to reference mode"
@@ -427,7 +507,7 @@ assert_contains "$(cat "$FORKS_ROOT/bootstrap_refs/repo/README.md")" 'feature br
 
 run_cmd bash "$FORKER_ROOT/pins-to-missing-wips.sh"
 assert_status 0 "pins-to-missing-wips.sh should skip existing clean managed clones"
-assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=0\tskipped=3\tfailed=0' "pins-to-missing-wips.sh should summarize clean existing clones as skips"
+assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=0\tskipped=4\tfailed=0' "pins-to-missing-wips.sh should summarize clean existing clones as skips"
 
 run_cmd bash "$FORKER_ROOT/verify-pins.sh" managed
 assert_status 0 "verify-pins.sh should dry-run replay for one managed entry"
@@ -435,7 +515,7 @@ assert_contains "$CMD_OUTPUT" 'OK: wip HEAD matches pinned HEAD' "verify-pins.sh
 
 run_cmd bash "$FORKER_ROOT/verify-all-pins.sh"
 assert_status 0 "verify-all-pins.sh should dry-run replay for all managed entries"
-assert_contains "$CMD_OUTPUT" $'summary\tverified=3\tfailed=0' "verify-all-pins.sh should print an aggregate summary"
+assert_contains "$CMD_OUTPUT" $'summary\tverified=4\tfailed=0' "verify-all-pins.sh should print an aggregate summary"
 
 run_cmd bash "$FORKER_ROOT/state.sh" managed
 assert_status 0 "state.sh should accept a clean managed clone"
@@ -550,7 +630,7 @@ rm -rf "$FORKS_ROOT/bootstrap/repo"
 printf '%s\n' 'dirty blocker' > "$FORKS_ROOT/bootstrap_refs/repo/dirty.txt"
 run_cmd bash "$FORKER_ROOT/pins-to-missing-wips.sh"
 assert_status 1 "pins-to-missing-wips.sh should continue past failures and return non-zero when any materialization fails"
-assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=1\tskipped=1\tfailed=1' "pins-to-missing-wips.sh should print an aggregate summary"
+assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=1\tskipped=2\tfailed=1' "pins-to-missing-wips.sh should print an aggregate summary"
 [ -d "$FORKS_ROOT/bootstrap/repo/.git" ] || fail "pins-to-missing-wips.sh should still rebuild missing managed clones"
 rm -f "$FORKS_ROOT/bootstrap_refs/repo/dirty.txt"
 

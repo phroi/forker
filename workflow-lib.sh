@@ -15,17 +15,72 @@ require_managed_entry() {
   fi
 }
 
+require_reference_entry() {
+  local name="$1"
+  local mode
+
+  mode=$(entry_mode "$name")
+  if [ "$mode" != "reference" ]; then
+    echo "ERROR: $name is a managed entry. Use 'bash $TOOL_REL/managed-to-reference.sh $name'." >&2
+    return 1
+  fi
+}
+
+build_reference_repo_unlocked() {
+  local repo_dir="$1" upstream="$2" remote_head_branch="$3"
+
+  rm -rf "$repo_dir"
+  git init --quiet "$repo_dir" || return 1
+  git -C "$repo_dir" remote add origin "$upstream" || return 1
+  git -C "$repo_dir" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" || return 1
+  git -C "$repo_dir" fetch --prune --depth=1 --quiet origin "+refs/heads/*:refs/remotes/origin/*" || return 1
+
+  if [ -n "$remote_head_branch" ]; then
+    set_local_origin_head "$repo_dir" "$remote_head_branch" || return 1
+  fi
+
+  _FORKER_REFERENCE_PRIMARY_BRANCH=$(reference_primary_branch "$repo_dir" "$remote_head_branch") || return 1
+  git -C "$repo_dir" checkout --quiet -B "$_FORKER_REFERENCE_PRIMARY_BRANCH" "origin/$_FORKER_REFERENCE_PRIMARY_BRANCH" || return 1
+  git -C "$repo_dir" branch --set-upstream-to="origin/$_FORKER_REFERENCE_PRIMARY_BRANCH" "$_FORKER_REFERENCE_PRIMARY_BRANCH" >/dev/null 2>&1 || true
+
+  _FORKER_REFERENCE_HEAD_SHA=$(repo_head "$repo_dir") || return 1
+  _FORKER_REFERENCE_REMOTE_HEAD_BRANCH="$remote_head_branch"
+}
+
 rebuild_reference_clone_unlocked() {
-  local name="$1" upstream="$2" default_branch="$3"
+  local name="$1" upstream="$2" remote_head_branch="$3"
   local work_repo
 
   reset_stage_entry "$name"
   work_repo=$(stage_repo_dir "$name")
+  build_reference_repo_unlocked "$work_repo" "$upstream" "$remote_head_branch" || return 1
+  publish_dir_swap "$work_repo" "$(live_repo_dir "$name")" || return 1
+  reference_repo_make_readonly "$(live_repo_dir "$name")" || return 1
+  cleanup_stage_entry "$name"
+}
 
-  git clone --depth 1 --branch "$default_branch" "$upstream" "$work_repo"
-  _FORKER_REFERENCE_HEAD_SHA=$(git -C "$work_repo" rev-parse HEAD)
+sync_reference_repo_unlocked() {
+  local repo_dir="$1" upstream="$2" remote_head_branch="$3"
 
-  publish_repo_swap "$name"
+  git -C "$repo_dir" remote set-url origin "$upstream" >/dev/null 2>&1 || return 1
+  git -C "$repo_dir" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" || return 1
+  git -C "$repo_dir" reset --hard --quiet || return 1
+  git -C "$repo_dir" clean -fdx >/dev/null 2>&1 || return 1
+  git -C "$repo_dir" fetch --prune --depth=1 --quiet origin "+refs/heads/*:refs/remotes/origin/*" || return 1
+
+  if [ -n "$remote_head_branch" ]; then
+    set_local_origin_head "$repo_dir" "$remote_head_branch" || return 1
+  fi
+
+  _FORKER_REFERENCE_PRIMARY_BRANCH=$(reference_primary_branch "$repo_dir" "$remote_head_branch") || return 1
+  git -C "$repo_dir" checkout --quiet -B "$_FORKER_REFERENCE_PRIMARY_BRANCH" "origin/$_FORKER_REFERENCE_PRIMARY_BRANCH" || return 1
+  git -C "$repo_dir" reset --hard --quiet "origin/$_FORKER_REFERENCE_PRIMARY_BRANCH" || return 1
+  git -C "$repo_dir" clean -fdx >/dev/null 2>&1 || return 1
+  git -C "$repo_dir" branch --set-upstream-to="origin/$_FORKER_REFERENCE_PRIMARY_BRANCH" "$_FORKER_REFERENCE_PRIMARY_BRANCH" >/dev/null 2>&1 || true
+
+  _FORKER_REFERENCE_HEAD_SHA=$(repo_head "$repo_dir") || return 1
+  _FORKER_REFERENCE_REMOTE_HEAD_BRANCH="$remote_head_branch"
+  reference_repo_make_readonly "$repo_dir" || return 1
 }
 
 load_entry_state() {
@@ -41,83 +96,115 @@ load_entry_state() {
   _FORKER_ENTRY_ACTUAL_HEAD=""
   _FORKER_ENTRY_BASELINE_REF=""
   _FORKER_ENTRY_BASELINE_SHA=""
+  _FORKER_ENTRY_REMOTE_HEAD_REF=""
+  _FORKER_ENTRY_READONLY=""
 
   if [ ! -d "$_FORKER_ENTRY_REPO/.git" ]; then
     _FORKER_ENTRY_STATUS="missing"
     return 0
   fi
 
-  if [ "$_FORKER_ENTRY_MODE" = "managed" ] && _FORKER_ENTRY_PINNED_HEAD=$(pinned_head "$_FORKER_ENTRY_PIN" 2>/dev/null); then
-    if has_legacy_local_patches "$_FORKER_ENTRY_PIN"; then
-      _FORKER_ENTRY_STATUS="pins-legacy"
+  if [ "$_FORKER_ENTRY_MODE" = "managed" ]; then
+    if _FORKER_ENTRY_PINNED_HEAD=$(pinned_head "$_FORKER_ENTRY_PIN" 2>/dev/null); then
+      if has_legacy_local_patches "$_FORKER_ENTRY_PIN"; then
+        _FORKER_ENTRY_STATUS="pins-legacy"
+        return 0
+      fi
+
+      _FORKER_ENTRY_LOCAL_BASE=$(local_base "$_FORKER_ENTRY_PIN" 2>/dev/null) || {
+        _FORKER_ENTRY_STATUS="pins-missing-local-base"
+        return 0
+      }
+
+      _FORKER_ENTRY_ACTUAL_HEAD=$(repo_head "$_FORKER_ENTRY_REPO")
+
+      if repo_has_worktree_changes "$_FORKER_ENTRY_REPO"; then
+        _FORKER_ENTRY_STATUS="worktree-dirty-pins"
+        return 0
+      fi
+
+      if git -C "$_FORKER_ENTRY_REPO" merge-base --is-ancestor "$_FORKER_ENTRY_LOCAL_BASE" "$_FORKER_ENTRY_ACTUAL_HEAD" >/dev/null 2>&1 \
+        && ! commit_range_has_merges "$_FORKER_ENTRY_REPO" "$_FORKER_ENTRY_LOCAL_BASE" "$_FORKER_ENTRY_ACTUAL_HEAD" \
+        && saved_series_matches_ref "$_FORKER_ENTRY_REPO" "$_FORKER_ENTRY_PIN" "$_FORKER_ENTRY_ACTUAL_HEAD"; then
+        if [ "$_FORKER_ENTRY_ACTUAL_HEAD" = "$_FORKER_ENTRY_PINNED_HEAD" ]; then
+          _FORKER_ENTRY_STATUS="matches-pins"
+        else
+          _FORKER_ENTRY_STATUS="matches-saved-series"
+        fi
+        return 0
+      fi
+
+      if managed_clone_is_clean "$name" "$_FORKER_ENTRY_REPO"; then
+        _FORKER_ENTRY_BASELINE_REF=$(managed_baseline_ref "$name" "$_FORKER_ENTRY_REPO")
+        _FORKER_ENTRY_STATUS="clean-upstream-tip"
+        return 0
+      fi
+
+      if ! git -C "$_FORKER_ENTRY_REPO" merge-base --is-ancestor "$_FORKER_ENTRY_LOCAL_BASE" "$_FORKER_ENTRY_ACTUAL_HEAD" >/dev/null 2>&1; then
+        _FORKER_ENTRY_STATUS="head-not-based-on-local-base"
+        return 0
+      fi
+
+      if commit_range_has_merges "$_FORKER_ENTRY_REPO" "$_FORKER_ENTRY_LOCAL_BASE" "$_FORKER_ENTRY_ACTUAL_HEAD"; then
+        _FORKER_ENTRY_STATUS="local-series-has-merges"
+        return 0
+      fi
+
+      _FORKER_ENTRY_STATUS="series-diverged"
       return 0
     fi
 
-    _FORKER_ENTRY_LOCAL_BASE=$(local_base "$_FORKER_ENTRY_PIN" 2>/dev/null) || {
-      _FORKER_ENTRY_STATUS="pins-missing-local-base"
+    _FORKER_ENTRY_BASELINE_REF=$(managed_baseline_ref "$name" "$_FORKER_ENTRY_REPO" 2>/dev/null) || {
+      _FORKER_ENTRY_STATUS="no-remote-baseline"
       return 0
     }
-
+    _FORKER_ENTRY_BASELINE_SHA=$(managed_baseline_sha "$name" "$_FORKER_ENTRY_REPO")
     _FORKER_ENTRY_ACTUAL_HEAD=$(repo_head "$_FORKER_ENTRY_REPO")
 
+    if [ "$_FORKER_ENTRY_ACTUAL_HEAD" != "$_FORKER_ENTRY_BASELINE_SHA" ]; then
+      _FORKER_ENTRY_STATUS="head-diverged"
+      return 0
+    fi
+
     if repo_has_worktree_changes "$_FORKER_ENTRY_REPO"; then
-      _FORKER_ENTRY_STATUS="worktree-dirty-pins"
+      _FORKER_ENTRY_STATUS="worktree-dirty-baseline"
       return 0
     fi
 
-    if git -C "$_FORKER_ENTRY_REPO" merge-base --is-ancestor "$_FORKER_ENTRY_LOCAL_BASE" "$_FORKER_ENTRY_ACTUAL_HEAD" >/dev/null 2>&1 \
-      && ! commit_range_has_merges "$_FORKER_ENTRY_REPO" "$_FORKER_ENTRY_LOCAL_BASE" "$_FORKER_ENTRY_ACTUAL_HEAD" \
-      && saved_series_matches_ref "$_FORKER_ENTRY_REPO" "$_FORKER_ENTRY_PIN" "$_FORKER_ENTRY_ACTUAL_HEAD"; then
-      if [ "$_FORKER_ENTRY_ACTUAL_HEAD" = "$_FORKER_ENTRY_PINNED_HEAD" ]; then
-        _FORKER_ENTRY_STATUS="matches-pins"
-      else
-        _FORKER_ENTRY_STATUS="matches-saved-series"
-      fi
-      return 0
-    fi
-
-    if reference_clone_is_clean "$_FORKER_ENTRY_REPO"; then
-      _FORKER_ENTRY_BASELINE_REF=$(reference_baseline_ref "$_FORKER_ENTRY_REPO")
-      _FORKER_ENTRY_STATUS="clean-upstream-tip"
-      return 0
-    fi
-
-    if ! git -C "$_FORKER_ENTRY_REPO" merge-base --is-ancestor "$_FORKER_ENTRY_LOCAL_BASE" "$_FORKER_ENTRY_ACTUAL_HEAD" >/dev/null 2>&1; then
-      _FORKER_ENTRY_STATUS="head-not-based-on-local-base"
-      return 0
-    fi
-
-    if commit_range_has_merges "$_FORKER_ENTRY_REPO" "$_FORKER_ENTRY_LOCAL_BASE" "$_FORKER_ENTRY_ACTUAL_HEAD"; then
-      _FORKER_ENTRY_STATUS="local-series-has-merges"
-      return 0
-    fi
-
-    _FORKER_ENTRY_STATUS="series-diverged"
+    _FORKER_ENTRY_STATUS="managed-no-pins-clean"
     return 0
   fi
 
-  _FORKER_ENTRY_BASELINE_REF=$(reference_baseline_ref "$_FORKER_ENTRY_REPO" 2>/dev/null) || {
+  _FORKER_ENTRY_REMOTE_HEAD_REF=$(local_origin_head_ref "$_FORKER_ENTRY_REPO" 2>/dev/null || true)
+  _FORKER_ENTRY_BASELINE_REF=$(reference_primary_ref "$_FORKER_ENTRY_REPO" 2>/dev/null) || {
     _FORKER_ENTRY_STATUS="no-remote-baseline"
     return 0
   }
-  _FORKER_ENTRY_BASELINE_SHA=$(local_origin_head_sha "$_FORKER_ENTRY_REPO")
+  _FORKER_ENTRY_BASELINE_SHA=$(reference_primary_sha "$_FORKER_ENTRY_REPO")
   _FORKER_ENTRY_ACTUAL_HEAD=$(repo_head "$_FORKER_ENTRY_REPO")
+
+  if reference_repo_is_readonly "$_FORKER_ENTRY_REPO"; then
+    _FORKER_ENTRY_READONLY="yes"
+  else
+    _FORKER_ENTRY_READONLY="no"
+  fi
 
   if [ "$_FORKER_ENTRY_ACTUAL_HEAD" != "$_FORKER_ENTRY_BASELINE_SHA" ]; then
     _FORKER_ENTRY_STATUS="head-diverged"
     return 0
   fi
 
-  if repo_has_worktree_changes "$_FORKER_ENTRY_REPO"; then
+  if reference_repo_has_worktree_changes "$_FORKER_ENTRY_REPO"; then
     _FORKER_ENTRY_STATUS="worktree-dirty-baseline"
     return 0
   fi
 
-  if [ "$_FORKER_ENTRY_MODE" = "managed" ]; then
-    _FORKER_ENTRY_STATUS="managed-no-pins-clean"
-  else
-    _FORKER_ENTRY_STATUS="reference-clean"
+  if [ "$_FORKER_ENTRY_READONLY" != "yes" ]; then
+    _FORKER_ENTRY_STATUS="reference-writable"
+    return 0
   fi
+
+  _FORKER_ENTRY_STATUS="reference-clean"
 }
 
 managed_clone_is_replaceable() {
@@ -354,8 +441,17 @@ derive_bootstrap_save_base() {
   local bootstrap_pin="$4"
   local bootstrap_log="$5"
   local -n base_ref="$6"
+  local upstream base_branch
 
-  if ! build_upstream_to_pins_staging "$name" 0 "$bootstrap_repo" "$bootstrap_pin" >"$bootstrap_log" 2>&1; then
+  upstream=$(upstream_url "$name")
+  base_branch=$(managed_requested_base_branch "$name" "$upstream" 2>/dev/null || true)
+
+  if [ -z "$base_branch" ]; then
+    echo "ERROR: bootstrap save could not resolve a managed base branch." >&2
+    return 1
+  fi
+
+  if ! build_upstream_to_pins_staging "$name" "$base_branch" 0 "$bootstrap_repo" "$bootstrap_pin" >"$bootstrap_log" 2>&1; then
     cat "$bootstrap_log" >&2
     echo "ERROR: bootstrap save could not derive the managed base." >&2
     return 1
@@ -461,10 +557,10 @@ resolve_conflict() {
 }
 
 build_upstream_to_pins_staging() {
-  local name="$1" preserve_saved_series="$2" output_repo="$3" output_pin="$4"
-  shift 4
+  local name="$1" base_branch="$2" preserve_saved_series="$3" output_repo="$4" output_pin="$5"
+  shift 5
 
-  local upstream real_pin default_branch base_sha
+  local upstream real_pin base_sha
   local merge_idx merge_ref merge_sha merge_msg old_merge_res=""
   local local_base_sha head_sha fork_remote resolution_count local_series_count
   local -a refs=() conflicted=() pids=()
@@ -492,11 +588,16 @@ build_upstream_to_pins_staging() {
   git -C "$output_repo" config merge.conflictStyle diff3
   git -C "$output_repo" config core.abbrev 40
 
-  default_branch=$(git -C "$output_repo" branch --show-current)
+  if ! git -C "$output_repo" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+    echo "ERROR: base branch '$base_branch' is not available from upstream." >&2
+    return 1
+  fi
+
+  git -C "$output_repo" checkout -B "$base_branch" "origin/$base_branch"
   base_sha=$(git -C "$output_repo" rev-parse HEAD)
   git -C "$output_repo" checkout -b wip
 
-  printf '%s\t%s\n' "$base_sha" "$default_branch" > "$output_pin/manifest"
+  printf '%s\t%s\n' "$base_sha" "$base_branch" > "$output_pin/manifest"
 
   merge_idx=0
   for ref in "${refs[@]}"; do
@@ -585,7 +686,7 @@ build_upstream_to_pins_staging() {
   local_series_count=$(saved_series_count "$output_pin")
 
   _FORKER_BUILD_BASE_SHA="$base_sha"
-  _FORKER_BUILD_DEFAULT_BRANCH="$default_branch"
+  _FORKER_BUILD_DEFAULT_BRANCH="$base_branch"
   _FORKER_BUILD_MERGE_COUNT="$merge_idx"
   _FORKER_BUILD_LOCAL_BASE_SHA="$local_base_sha"
   _FORKER_BUILD_HEAD_SHA="$head_sha"
@@ -703,10 +804,18 @@ upstream_to_pins_workflow() {
   local name="$1" preserve_saved_series="$2"
   shift 2
 
-  local real_repo real_pin work_repo work_pin
+  local real_repo real_pin work_repo work_pin upstream base_branch
 
   require_managed_entry "$name" || return 1
   acquire_entry_lock "$name" || return 1
+  upstream=$(upstream_url "$name")
+  base_branch=$(managed_requested_base_branch "$name" "$upstream" 2>/dev/null || true)
+
+  if [ -z "$base_branch" ]; then
+    echo "ERROR: cannot resolve base branch for $name." >&2
+    release_entry_lock "$name"
+    return 1
+  fi
 
   if ! managed_clone_is_replaceable "$name"; then
     state_workflow "$name" >&2 || true
@@ -723,7 +832,7 @@ upstream_to_pins_workflow() {
   work_repo=$(stage_repo_dir "$name")
   work_pin=$(stage_pin_dir "$name")
 
-  if ! build_upstream_to_pins_staging "$name" "$preserve_saved_series" "$work_repo" "$work_pin" "$@"; then
+  if ! build_upstream_to_pins_staging "$name" "$base_branch" "$preserve_saved_series" "$work_repo" "$work_pin" "$@"; then
     cleanup_stage_entry "$name"
     echo "FAILED: previous state is intact" >&2
     release_entry_lock "$name"
@@ -814,7 +923,7 @@ rebuild_pins_workflow() {
 
 sync_reference_workflow() {
   local name="$1"
-  local mode upstream real_repo default_branch old_sha new_sha current_sha detail
+  local mode upstream real_repo remote_head_branch old_sha new_sha current_sha detail old_primary old_readonly
 
   mode=$(entry_mode "$name")
   upstream=$(upstream_url "$name")
@@ -827,64 +936,71 @@ sync_reference_workflow() {
     return 0
   fi
 
-  default_branch=$(remote_default_branch "$upstream") || default_branch=""
-  if [ -z "$default_branch" ]; then
-    _FORKER_SYNC_STATUS="failed"
-    printf '%s\t%s\t-\t-\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "cannot resolve remote HEAD"
-    return 1
-  fi
+  remote_head_branch=$(remote_default_branch "$upstream" 2>/dev/null || true)
 
   acquire_entry_lock "$name" || return 1
 
   if [ ! -d "$real_repo/.git" ]; then
-    rebuild_reference_clone_unlocked "$name" "$upstream" "$default_branch"
+    if ! rebuild_reference_clone_unlocked "$name" "$upstream" "$remote_head_branch"; then
+      cleanup_stage_entry "$name"
+      release_entry_lock "$name"
+      _FORKER_SYNC_STATUS="failed"
+      printf '%s\t%s\t-\t-\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "could not materialize reference clone"
+      return 1
+    fi
+
     new_sha="$_FORKER_REFERENCE_HEAD_SHA"
     release_entry_lock "$name"
 
     _FORKER_SYNC_STATUS="cloned"
-    printf '%s\t%s\t-\t%s\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "$new_sha" "$default_branch"
-    return 0
-  fi
-
-  if ! reference_clone_is_clean "$real_repo"; then
-    current_sha=$(repo_head "$real_repo" 2>/dev/null || printf -- '-')
-    _FORKER_SYNC_STATUS="skipped"
-    release_entry_lock "$name"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "$current_sha" "$current_sha" "dirty clone"
+    printf '%s\t%s\t-\t%s\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "$new_sha" "$_FORKER_REFERENCE_PRIMARY_BRANCH"
     return 0
   fi
 
   old_sha=$(repo_head "$real_repo")
+  old_primary=$(reference_primary_branch "$real_repo" "$(reference_remote_head_branch "$real_repo" 2>/dev/null || true)" 2>/dev/null || true)
+  if reference_repo_is_readonly "$real_repo"; then
+    old_readonly=yes
+  else
+    old_readonly=no
+  fi
 
-  git -C "$real_repo" fetch --depth=1 origin "+refs/heads/$default_branch:refs/remotes/origin/$default_branch"
-  set_local_origin_head "$real_repo" "$default_branch"
-  git -C "$real_repo" checkout -B "$default_branch" "origin/$default_branch"
-  git -C "$real_repo" branch --set-upstream-to="origin/$default_branch" "$default_branch" >/dev/null 2>&1 || true
+  reference_repo_make_writable "$real_repo" || {
+    release_entry_lock "$name"
+    _FORKER_SYNC_STATUS="failed"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "$old_sha" "$old_sha" "could not unlock reference clone"
+    return 1
+  }
 
-  new_sha=$(repo_head "$real_repo")
+  if ! sync_reference_repo_unlocked "$real_repo" "$upstream" "$remote_head_branch"; then
+    reference_repo_make_readonly "$real_repo" >/dev/null 2>&1 || true
+    current_sha=$(repo_head "$real_repo" 2>/dev/null || printf -- '-')
+    release_entry_lock "$name"
+    _FORKER_SYNC_STATUS="failed"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "$old_sha" "$current_sha" "sync failed"
+    return 1
+  fi
 
-  if [ "$old_sha" = "$new_sha" ]; then
+  new_sha="$_FORKER_REFERENCE_HEAD_SHA"
+
+  if [ "$old_sha" = "$new_sha" ] && [ "$old_primary" = "$_FORKER_REFERENCE_PRIMARY_BRANCH" ] && [ "$old_readonly" = yes ]; then
     _FORKER_SYNC_STATUS="unchanged"
   else
     _FORKER_SYNC_STATUS="updated"
   fi
 
   release_entry_lock "$name"
-  printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "$old_sha" "$new_sha" "$default_branch"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$_FORKER_SYNC_STATUS" "$old_sha" "$new_sha" "$_FORKER_REFERENCE_PRIMARY_BRANCH"
 }
 
 managed_to_reference_workflow() {
   local name="$1"
-  local upstream default_branch head_sha
+  local upstream remote_head_branch head_sha
 
   require_managed_entry "$name" || return 1
   upstream=$(upstream_url "$name")
 
-  default_branch=$(remote_default_branch "$upstream") || default_branch=""
-  if [ -z "$default_branch" ]; then
-    echo "ERROR: cannot resolve remote HEAD for $name." >&2
-    return 1
-  fi
+  remote_head_branch=$(remote_default_branch "$upstream" 2>/dev/null || true)
 
   acquire_entry_lock "$name" || return 1
 
@@ -897,14 +1013,72 @@ managed_to_reference_workflow() {
     return 1
   fi
 
-  rebuild_reference_clone_unlocked "$name" "$upstream" "$default_branch"
+  rebuild_reference_clone_unlocked "$name" "$upstream" "$remote_head_branch" || {
+    cleanup_stage_entry "$name"
+    release_entry_lock "$name"
+    return 1
+  }
   head_sha="$_FORKER_REFERENCE_HEAD_SHA"
 
   rm -rf "$(live_pin_dir "$name")"
   set_entry_mode_reference "$name"
   release_entry_lock "$name"
 
-  echo "$name: converted to reference at $head_sha ($default_branch)"
+  echo "$name: converted to reference at $head_sha ($_FORKER_REFERENCE_PRIMARY_BRANCH)"
+}
+
+reference_to_managed_workflow() {
+  local name="$1"
+  local upstream real_repo work_repo work_pin primary_branch remote_head_branch
+
+  require_reference_entry "$name" || return 1
+  upstream=$(upstream_url "$name")
+  real_repo=$(live_repo_dir "$name")
+  acquire_entry_lock "$name" || return 1
+
+  if [ -d "$real_repo/.git" ]; then
+    primary_branch=$(reference_primary_branch "$real_repo" "$(reference_remote_head_branch "$real_repo" 2>/dev/null || true)" 2>/dev/null || true)
+  fi
+
+  if [ -z "$primary_branch" ]; then
+    remote_head_branch=$(remote_default_branch "$upstream" 2>/dev/null || true)
+    reset_stage_entry "$name"
+    work_repo=$(stage_repo_dir "$name")
+    if ! build_reference_repo_unlocked "$work_repo" "$upstream" "$remote_head_branch"; then
+      cleanup_stage_entry "$name"
+      release_entry_lock "$name"
+      echo "ERROR: could not resolve the current reference primary branch for $name." >&2
+      return 1
+    fi
+    primary_branch="$_FORKER_REFERENCE_PRIMARY_BRANCH"
+    cleanup_stage_entry "$name"
+  fi
+
+  reset_stage_entry "$name"
+  work_repo=$(stage_repo_dir "$name")
+  work_pin=$(stage_pin_dir "$name")
+  if ! build_upstream_to_pins_staging "$name" "$primary_branch" 0 "$work_repo" "$work_pin"; then
+    cleanup_stage_entry "$name"
+    echo "FAILED: previous state is intact" >&2
+    release_entry_lock "$name"
+    return 1
+  fi
+
+  if [ -d "$real_repo/.git" ]; then
+    reference_repo_make_writable "$real_repo" || {
+      cleanup_stage_entry "$name"
+      release_entry_lock "$name"
+      echo "ERROR: could not unlock the existing reference clone for $name." >&2
+      return 1
+    }
+  fi
+
+  publish_entry_swap "$name"
+  set_entry_mode_managed "$name" "$primary_branch"
+  release_entry_lock "$name"
+
+  echo "$name: converted to managed with base_branch=$primary_branch"
+  echo "OK: wip HEAD matches pinned HEAD ($_FORKER_BUILD_HEAD_SHA)"
 }
 
 state_workflow() {
@@ -960,23 +1134,51 @@ state_workflow() {
       echo "$name: managed clone has no pins and is clean at $_FORKER_ENTRY_BASELINE_REF"
       ;;
     no-remote-baseline)
-      echo "$name: clone has no remote baseline"
+      if [ "$_FORKER_ENTRY_MODE" = "reference" ]; then
+        echo "$name: reference clone has no mirrored remote branches"
+      else
+        echo "$name: clone has no remote baseline"
+      fi
       return 1
       ;;
     head-diverged)
-      echo "$name: HEAD diverged from $_FORKER_ENTRY_BASELINE_REF:"
-      echo "  baseline  $_FORKER_ENTRY_BASELINE_SHA"
-      echo "  actual    $_FORKER_ENTRY_ACTUAL_HEAD"
-      git -C "$_FORKER_ENTRY_REPO" log --oneline "$_FORKER_ENTRY_BASELINE_SHA..$_FORKER_ENTRY_ACTUAL_HEAD" 2>/dev/null || true
+      if [ "$_FORKER_ENTRY_MODE" = "reference" ]; then
+        echo "$name: reference clone drifted from primary $_FORKER_ENTRY_BASELINE_REF:"
+        echo "  primary      $_FORKER_ENTRY_BASELINE_SHA"
+        echo "  actual       $_FORKER_ENTRY_ACTUAL_HEAD"
+        echo "  remote_head  ${_FORKER_ENTRY_REMOTE_HEAD_REF:-unknown}"
+        echo "  readonly     $_FORKER_ENTRY_READONLY"
+        git -C "$_FORKER_ENTRY_REPO" log --oneline "$_FORKER_ENTRY_BASELINE_SHA..$_FORKER_ENTRY_ACTUAL_HEAD" 2>/dev/null || true
+      else
+        echo "$name: HEAD diverged from $_FORKER_ENTRY_BASELINE_REF:"
+        echo "  baseline  $_FORKER_ENTRY_BASELINE_SHA"
+        echo "  actual    $_FORKER_ENTRY_ACTUAL_HEAD"
+        git -C "$_FORKER_ENTRY_REPO" log --oneline "$_FORKER_ENTRY_BASELINE_SHA..$_FORKER_ENTRY_ACTUAL_HEAD" 2>/dev/null || true
+      fi
       return 1
       ;;
     worktree-dirty-baseline)
-      echo "$name: clone has changes relative to $_FORKER_ENTRY_BASELINE_REF:"
+      if [ "$_FORKER_ENTRY_MODE" = "reference" ]; then
+        echo "$name: reference clone has worktree changes relative to primary $_FORKER_ENTRY_BASELINE_REF:"
+        echo "  remote_head  ${_FORKER_ENTRY_REMOTE_HEAD_REF:-unknown}"
+        echo "  readonly     $_FORKER_ENTRY_READONLY"
+      else
+        echo "$name: clone has changes relative to $_FORKER_ENTRY_BASELINE_REF:"
+      fi
       show_repo_worktree_changes "$_FORKER_ENTRY_REPO" "$_FORKER_ENTRY_BASELINE_REF"
       return 1
       ;;
+    reference-writable)
+      echo "$name: reference clone is writable but should be read-only:"
+      echo "  primary      $_FORKER_ENTRY_BASELINE_REF"
+      echo "  remote_head  ${_FORKER_ENTRY_REMOTE_HEAD_REF:-unknown}"
+      echo "  readonly     $_FORKER_ENTRY_READONLY"
+      return 1
+      ;;
     reference-clean)
-      echo "$name: reference clone matches $_FORKER_ENTRY_BASELINE_REF"
+      echo "$name: reference clone matches primary $_FORKER_ENTRY_BASELINE_REF"
+      echo "  remote_head  ${_FORKER_ENTRY_REMOTE_HEAD_REF:-unknown}"
+      echo "  readonly     $_FORKER_ENTRY_READONLY"
       ;;
     *)
       echo "ERROR: unknown entry state for $name: $_FORKER_ENTRY_STATUS" >&2
@@ -1388,6 +1590,8 @@ health_workflow() {
     load_entry_state "$name"
     if [ "$_FORKER_ENTRY_STATUS" = "missing" ]; then
       health_warn clone "$name" missing
+    elif [ "$_FORKER_ENTRY_STATUS" = "reference-writable" ]; then
+      health_error clone "$name" writable-reference
     elif [ "$_FORKER_ENTRY_STATUS" = "local-series-has-merges" ]; then
       health_warn clone "$name" non-linear-local-series
     elif entry_state_is_safe "$name"; then
