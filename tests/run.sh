@@ -397,6 +397,26 @@ run_cmd bash "$FORKER_ROOT/sync-reference.sh" convertible_reference
 assert_status 0 "sync-reference.sh should clone a convertible reference entry"
 assert_equals "$(git -C "$FORKS_ROOT/convertible_reference/repo" branch --show-current)" 'dev' "sync-reference.sh should start convertible references on their newest branch"
 
+chmod -R u+w "$FORKS_ROOT/branchy_reference/repo"
+printf '%s\n' 'unsafe reference edit' >> "$FORKS_ROOT/branchy_reference/repo/README.md"
+run_cmd bash "$FORKER_ROOT/reference-to-managed.sh" branchy_reference
+assert_status 1 "reference-to-managed.sh should reject writable drifted reference clones"
+assert_contains "$CMD_OUTPUT" 'ERROR: branchy_reference is not a clean read-only reference mirror.' "reference-to-managed.sh should explain writable reference drift"
+
+run_cmd bash "$FORKER_ROOT/sync-reference.sh" branchy_reference
+assert_status 0 "sync-reference.sh should relock a reference clone after discarding local drift"
+
+chmod -R u+w "$FORKS_ROOT/reference/repo"
+printf '%s\n' 'stash conversion blocker' >> "$FORKS_ROOT/reference/repo/README.md"
+git -C "$FORKS_ROOT/reference/repo" stash push --include-untracked -m 'reference conversion blocker' >/dev/null 2>&1
+chmod -R a-w "$FORKS_ROOT/reference/repo"
+run_cmd bash "$FORKER_ROOT/reference-to-managed.sh" reference
+assert_status 1 "reference-to-managed.sh should reject reference clones with stash entries"
+assert_contains "$CMD_OUTPUT" 'reference-local stash entries that would be lost' "reference-to-managed.sh should explain stash loss risk"
+chmod -R u+w "$FORKS_ROOT/reference/repo"
+git -C "$FORKS_ROOT/reference/repo" stash drop >/dev/null 2>&1
+chmod -R a-w "$FORKS_ROOT/reference/repo"
+
 run_cmd bash "$FORKER_ROOT/sync-all-references.sh"
 assert_status 0 "sync-all-references.sh should complete when entries are healthy"
 assert_contains "$CMD_OUTPUT" $'summary\tupdated=0\tcloned=0\tunchanged=3\tskipped=0\tfailed=0' "sync-all-references.sh should print an aggregate summary"
