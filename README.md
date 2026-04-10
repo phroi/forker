@@ -4,8 +4,8 @@ Forker manages reference clones and managed forks under `forks/<name>/{repo,pin}
 
 It manages:
 
-- `reference`: shallow clone kept current from upstream
-- `managed`: reproducible fork whose authoritative state lives in `forks/<name>/pin/`
+- `reference`: read-only upstream mirror that fetches all remote branches and checks out the newest mirrored branch
+- `managed`: writable, reproducible fork whose authoritative state lives in `forks/<name>/pin/`
 
 Each entry root looks like:
 
@@ -23,6 +23,7 @@ Only `forks/<name>/{repo,pin}` is live state. `forks/.stage/` is disposable scra
 - Full workspace bootstrap: `bash forks/phroi_forker/repo/bootstrap-workspace.sh`
 - Refresh all references: `bash forks/phroi_forker/repo/sync-all-references.sh`
 - Refresh one reference clone: `bash forks/phroi_forker/repo/sync-reference.sh <name>`
+- Convert one reference entry into a writable managed clone pinned at its current primary branch: `bash forks/phroi_forker/repo/reference-to-managed.sh <name>`
 - Materialize missing managed clones: `bash forks/phroi_forker/repo/pins-to-missing-wips.sh`
 - Safely replace one managed clone: `bash forks/phroi_forker/repo/rebuild-wip.sh <name>`
 - Derive fresh pins (discarding old pins and saved series): `bash forks/phroi_forker/repo/rebuild-pins.sh <name> [ref ...]`
@@ -37,12 +38,20 @@ Only `forks/<name>/{repo,pin}` is live state. `forks/.stage/` is disposable scra
 ## Rules That Matter
 
 - `rebuild-wip.sh` is the only public managed command that may replace an existing clone.
+- Reference clones are read-only between explicit mutation commands. `sync-reference.sh` may reset them to the newest mirrored upstream branch and relock them afterward.
 - A managed clone is safe to replace when it is missing, already matches pins, its saved series matches pins, or it is clean and exactly at upstream tip with no local-only commits.
 - `managed-to-reference.sh` only works for replaceable managed entries. It deletes `pin/` and rewrites the config entry to `mode=reference`.
+- `reference-to-managed.sh` records the current reference primary branch as managed `base_branch`, creates pins, and leaves a writable `wip` clone.
 - `pins-to-wip.sh` is missing-only. If the clone already exists, use `rebuild-wip.sh`.
 - `upstream-to-pins.sh` preserves the saved series. `rebuild-pins.sh` discards old pins, old saved series, and old recorded resolutions.
 - `wip-to-series.sh` records committed history only. For pinned entries it expects a clean `wip` branch in `forks/<name>/repo` with a linear local series after `LOCAL_BASE`.
 - `series-to-branch.sh` expects a clean `wip` whose live commit series matches the saved pin series.
+
+## Managed Base Branch
+
+- Managed entries may set `base_branch` in `forks/config.json`.
+- Pin rebuilds start from `base_branch` when present, otherwise they fall back to the upstream default branch.
+- `refs` still means extra upstream branches or PR refs merged on top of `base_branch`.
 
 ## Pin Model
 

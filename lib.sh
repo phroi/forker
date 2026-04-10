@@ -26,7 +26,13 @@ write_config_json() {
 set_entry_mode_reference() {
   local name="$1"
 
-  jq --arg name "$name" '.[$name] |= (.mode = "reference" | del(.refs, .fork))' "$FORKS_DIR/config.json" | write_config_json
+  jq --arg name "$name" '.[$name] |= (.mode = "reference" | del(.base_branch, .refs, .fork))' "$FORKS_DIR/config.json" | write_config_json
+}
+
+set_entry_mode_managed() {
+  local name="$1" base_branch="$2"
+
+  jq --arg name "$name" --arg base_branch "$base_branch" '.[$name] |= (.mode = "managed" | .base_branch = $base_branch | .refs = (.refs // []))' "$FORKS_DIR/config.json" | write_config_json
 }
 
 entry_mode() {
@@ -143,6 +149,7 @@ reset_stage_entry() {
 
   stage_entry=$(stage_entry_dir "$name")
   unregister_exit_cleanup_dir "$stage_entry"
+  chmod -R u+w "$stage_entry" 2>/dev/null || true
   rm -rf "$stage_entry"
   mkdir -p "$stage_entry"
   register_exit_cleanup_dir "$stage_entry"
@@ -152,6 +159,7 @@ cleanup_stage_entry() {
   local stage_entry
 
   stage_entry=$(stage_entry_dir "$1")
+  chmod -R u+w "$stage_entry" 2>/dev/null || true
   rm -rf "$stage_entry"
   unregister_exit_cleanup_dir "$stage_entry"
 }
@@ -214,6 +222,23 @@ fork_url() {
 
 repo_refs() {
   config_val "$1" '(.refs // [])[]'
+}
+
+configured_base_branch() {
+  config_val "$1" '.base_branch // empty'
+}
+
+managed_requested_base_branch() {
+  local name="$1" upstream="$2"
+  local branch
+
+  branch=$(configured_base_branch "$name" 2>/dev/null || true)
+  if [ -n "$branch" ]; then
+    echo "$branch"
+    return 0
+  fi
+
+  remote_default_branch "$upstream"
 }
 
 all_entries() {
@@ -495,6 +520,84 @@ reference_baseline_ref() {
   current_upstream_ref "$1"
 }
 
+managed_baseline_ref() {
+  local name="$1" repo_dir="$2"
+  local branch ref
+
+  branch=$(configured_base_branch "$name" 2>/dev/null || true)
+  if [ -n "$branch" ]; then
+    ref="origin/$branch"
+    git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/$ref" || return 1
+    echo "$ref"
+    return 0
+  fi
+
+  reference_baseline_ref "$repo_dir"
+}
+
+managed_baseline_sha() {
+  local ref
+
+  ref=$(managed_baseline_ref "$1" "$2") || return 1
+  git -C "$2" rev-parse "$ref"
+}
+
+reference_remote_head_branch() {
+  local ref
+
+  ref=$(local_origin_head_ref "$1" 2>/dev/null) || ref=""
+  [ -n "$ref" ] || return 1
+  ref_label "$ref"
+}
+
+reference_primary_branch() {
+  local repo_dir="$1" default_branch="${2:-}"
+  local branch timestamp newest_timestamp=""
+  local -a newest_branches=()
+
+  while IFS=$'\t' read -r branch timestamp; do
+    [ "$branch" = "origin/HEAD" ] && continue
+    branch="${branch#origin/}"
+
+    if [ -z "$newest_timestamp" ]; then
+      newest_timestamp="$timestamp"
+      newest_branches=("$branch")
+      continue
+    fi
+
+    [ "$timestamp" = "$newest_timestamp" ] || break
+    newest_branches+=("$branch")
+  done < <(git -C "$repo_dir" for-each-ref --sort=-committerdate --format='%(refname:short)%09%(committerdate:unix)' refs/remotes/origin)
+
+  [ "${#newest_branches[@]}" -gt 0 ] || return 1
+  if [ -n "$default_branch" ]; then
+    for branch in "${newest_branches[@]}"; do
+      if [ "$branch" = "$default_branch" ]; then
+        echo "$branch"
+        return 0
+      fi
+    done
+  fi
+
+  echo "${newest_branches[0]}"
+}
+
+reference_primary_ref() {
+  local repo_dir="$1"
+  local default_branch branch
+
+  default_branch=$(reference_remote_head_branch "$repo_dir" 2>/dev/null || true)
+  branch=$(reference_primary_branch "$repo_dir" "$default_branch") || return 1
+  echo "origin/$branch"
+}
+
+reference_primary_sha() {
+  local ref
+
+  ref=$(reference_primary_ref "$1") || return 1
+  git -C "$1" rev-parse "$ref"
+}
+
 ref_label() {
   case "$1" in
     refs/remotes/origin/*)
@@ -551,6 +654,40 @@ reference_clone_is_clean() {
   [ "$(repo_head "$repo_dir")" = "$baseline" ] || return 1
   repo_has_worktree_changes "$repo_dir" && return 1
   return 0
+}
+
+managed_clone_is_clean() {
+  local name="$1" repo_dir="$2"
+  local baseline
+
+  baseline=$(managed_baseline_sha "$name" "$repo_dir") || return 1
+
+  [ "$(repo_head "$repo_dir")" = "$baseline" ] || return 1
+  repo_has_worktree_changes "$repo_dir" && return 1
+  return 0
+}
+
+reference_repo_has_worktree_changes() {
+  ! git -C "$1" diff --quiet 2>/dev/null \
+    || ! git -C "$1" diff --cached --quiet 2>/dev/null \
+    || repo_has_untracked "$1"
+}
+
+reference_repo_make_writable() {
+  chmod -R u+w "$1"
+}
+
+reference_repo_make_readonly() {
+  chmod -R a-w "$1"
+}
+
+reference_repo_is_readonly() {
+  local repo_dir="$1"
+  local writable_path
+
+  [ ! -w "$repo_dir/.git" ] || return 1
+  writable_path=$(find "$repo_dir" -path "$repo_dir/.git" -prune -o \( -type d -o -type f \) -perm /222 -print -quit)
+  [ -z "$writable_path" ]
 }
 
 apply_counted_resolutions() {
