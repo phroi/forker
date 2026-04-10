@@ -23,7 +23,7 @@ Only `forks/<name>/{repo,pin}` is live state. `forks/.stage/` is disposable scra
 - Full workspace bootstrap: `bash forks/phroi_forker/repo/bootstrap-workspace.sh`
 - Refresh all references: `bash forks/phroi_forker/repo/sync-all-references.sh`
 - Refresh one reference clone: `bash forks/phroi_forker/repo/sync-reference.sh <name>`
-- Convert one reference entry into a writable managed clone pinned at its current primary branch: `bash forks/phroi_forker/repo/reference-to-managed.sh <name>`
+- Convert one clean read-only reference entry into a writable managed clone pinned at its current primary branch: `bash forks/phroi_forker/repo/reference-to-managed.sh <name>`
 - Materialize missing managed clones: `bash forks/phroi_forker/repo/pins-to-missing-wips.sh`
 - Safely replace one managed clone: `bash forks/phroi_forker/repo/rebuild-wip.sh <name>`
 - Derive fresh pins (discarding old pins and saved series): `bash forks/phroi_forker/repo/rebuild-pins.sh <name> [ref ...]`
@@ -41,7 +41,7 @@ Only `forks/<name>/{repo,pin}` is live state. `forks/.stage/` is disposable scra
 - Reference clones are read-only between explicit mutation commands. `sync-reference.sh` may reset them to the newest mirrored upstream branch and relock them afterward.
 - A managed clone is safe to replace when it is missing, already matches pins, its saved series matches pins, or it is clean and exactly at upstream tip with no local-only commits.
 - `managed-to-reference.sh` only works for replaceable managed entries. It deletes `pin/` and rewrites the config entry to `mode=reference`.
-- `reference-to-managed.sh` records the current reference primary branch as managed `base_branch`, creates pins, and leaves a writable `wip` clone.
+- `reference-to-managed.sh` only accepts a clean read-only reference mirror. It rebuilds from the upstream primary branch, records that branch as managed `base_branch`, and leaves a writable `wip` clone.
 - `pins-to-wip.sh` is missing-only. If the clone already exists, use `rebuild-wip.sh`.
 - `upstream-to-pins.sh` preserves the saved series. `rebuild-pins.sh` discards old pins, old saved series, and old recorded resolutions.
 - `wip-to-series.sh` records committed history only. For pinned entries it expects a clean `wip` branch in `forks/<name>/repo` with a linear local series after `LOCAL_BASE`.

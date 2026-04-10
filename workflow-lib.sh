@@ -1030,11 +1030,34 @@ managed_to_reference_workflow() {
 reference_to_managed_workflow() {
   local name="$1"
   local upstream real_repo work_repo work_pin primary_branch remote_head_branch
+  local state
 
   require_reference_entry "$name" || return 1
   upstream=$(upstream_url "$name")
   real_repo=$(live_repo_dir "$name")
   acquire_entry_lock "$name" || return 1
+
+  if [ -d "$real_repo/.git" ] && repo_has_stash "$real_repo"; then
+    state_workflow "$name" >&2 || true
+    echo >&2
+    echo "ERROR: $name has reference-local stash entries that would be lost." >&2
+    echo "reference-to-managed.sh rebuilds from the upstream primary branch. Clear the stash or keep using the managed bootstrap path if local reference state must be preserved." >&2
+    release_entry_lock "$name"
+    return 1
+  fi
+
+  if [ -d "$real_repo/.git" ]; then
+    load_entry_state "$name"
+    state="$_FORKER_ENTRY_STATUS"
+    if [ "$state" != "reference-clean" ]; then
+      state_workflow "$name" >&2 || true
+      echo >&2
+      echo "ERROR: $name is not a clean read-only reference mirror." >&2
+      echo "reference-to-managed.sh rebuilds from the upstream primary branch and does not preserve local reference drift." >&2
+      release_entry_lock "$name"
+      return 1
+    fi
+  fi
 
   if [ -d "$real_repo/.git" ]; then
     primary_branch=$(reference_primary_branch "$real_repo" "$(reference_remote_head_branch "$real_repo" 2>/dev/null || true)" 2>/dev/null || true)
