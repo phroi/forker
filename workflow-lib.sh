@@ -8,6 +8,7 @@ require_managed_entry() {
   local name="$1"
   local mode
 
+  require_configured_entry "$name" || return 1
   mode=$(entry_mode "$name")
   if [ "$mode" != "managed" ]; then
     echo "ERROR: $name is a reference entry. Use 'bash $TOOL_REL/sync-reference.sh $name'." >&2
@@ -19,9 +20,17 @@ require_reference_entry() {
   local name="$1"
   local mode
 
+  require_configured_entry "$name" || return 1
   mode=$(entry_mode "$name")
   if [ "$mode" != "reference" ]; then
     echo "ERROR: $name is a managed entry. Use 'bash $TOOL_REL/managed-to-reference.sh $name'." >&2
+    return 1
+  fi
+}
+
+require_configured_entry() {
+  if ! entry_exists "$1"; then
+    echo "ERROR: $1 is not configured." >&2
     return 1
   fi
 }
@@ -86,6 +95,7 @@ sync_reference_repo_unlocked() {
 load_entry_state() {
   local name="$1"
 
+  require_configured_entry "$name" || return 1
   _FORKER_ENTRY_NAME="$name"
   _FORKER_ENTRY_MODE=$(entry_mode "$name")
   _FORKER_ENTRY_REPO=$(live_repo_dir "$name")
@@ -199,6 +209,11 @@ load_entry_state() {
     return 0
   fi
 
+  if repo_has_stash "$_FORKER_ENTRY_REPO"; then
+    _FORKER_ENTRY_STATUS="reference-stashed"
+    return 0
+  fi
+
   if [ "$_FORKER_ENTRY_READONLY" != "yes" ]; then
     _FORKER_ENTRY_STATUS="reference-writable"
     return 0
@@ -210,7 +225,7 @@ load_entry_state() {
 managed_clone_is_replaceable() {
   local name="$1"
 
-  load_entry_state "$name"
+  load_entry_state "$name" || return 1
   case "$_FORKER_ENTRY_STATUS" in
     missing|matches-pins|matches-saved-series|clean-upstream-tip|managed-no-pins-clean) return 0 ;;
     *) return 1 ;;
@@ -220,7 +235,7 @@ managed_clone_is_replaceable() {
 entry_state_is_safe() {
   local name="$1"
 
-  load_entry_state "$name"
+  load_entry_state "$name" || return 1
   case "$_FORKER_ENTRY_STATUS" in
     missing|matches-pins|matches-saved-series|clean-upstream-tip|managed-no-pins-clean|reference-clean) return 0 ;;
     *) return 1 ;;
@@ -925,6 +940,7 @@ sync_reference_workflow() {
   local name="$1"
   local mode upstream real_repo remote_head_branch old_sha new_sha current_sha detail old_primary old_readonly
 
+  require_configured_entry "$name" || return 1
   mode=$(entry_mode "$name")
   upstream=$(upstream_url "$name")
   real_repo=$(live_repo_dir "$name")
@@ -1027,6 +1043,58 @@ managed_to_reference_workflow() {
   echo "$name: converted to reference at $head_sha ($_FORKER_REFERENCE_PRIMARY_BRANCH)"
 }
 
+remove_reference_workflow() {
+  local name="$1"
+  local real_entry real_repo state
+
+  require_reference_entry "$name" || return 1
+
+  acquire_entry_lock "$name" || return 1
+  real_entry=$(entry_dir "$name")
+  real_repo=$(live_repo_dir "$name")
+
+  if [ -d "$real_repo/.git" ]; then
+    load_entry_state "$name" || {
+      release_entry_lock "$name"
+      return 1
+    }
+    state="$_FORKER_ENTRY_STATUS"
+    if [ "$state" = "reference-stashed" ]; then
+      state_workflow "$name" >&2 || true
+      echo >&2
+      echo "ERROR: $name has reference-local stash entries that would be lost." >&2
+      echo "Clear the stash before removing the entry." >&2
+      release_entry_lock "$name"
+      return 1
+    fi
+    if [ "$state" != "reference-clean" ] && [ "$state" != "reference-writable" ]; then
+      state_workflow "$name" >&2 || true
+      echo >&2
+      echo "ERROR: $name has local reference state that would be lost." >&2
+      echo "remove-reference.sh only removes missing or clean reference clones." >&2
+      release_entry_lock "$name"
+      return 1
+    fi
+  fi
+
+  chmod -R u+w "$real_entry" 2>/dev/null || true
+  rm -rf "$real_entry" || {
+    release_entry_lock "$name"
+    echo "ERROR: could not remove the live entry directory for $name." >&2
+    return 1
+  }
+
+  delete_config_entry "$name" || {
+    release_entry_lock "$name"
+    echo "ERROR: removed $name/ but could not rewrite forks/config.json." >&2
+    echo "Rerun 'bash $TOOL_REL/remove-reference.sh $name' or restore the entry manually." >&2
+    return 1
+  }
+
+  release_entry_lock "$name"
+  echo "$name: removed reference entry"
+}
+
 reference_to_managed_workflow() {
   local name="$1"
   local upstream real_repo work_repo work_pin primary_branch remote_head_branch
@@ -1047,8 +1115,19 @@ reference_to_managed_workflow() {
   fi
 
   if [ -d "$real_repo/.git" ]; then
-    load_entry_state "$name"
+    load_entry_state "$name" || {
+      release_entry_lock "$name"
+      return 1
+    }
     state="$_FORKER_ENTRY_STATUS"
+    if [ "$state" = "reference-stashed" ]; then
+      state_workflow "$name" >&2 || true
+      echo >&2
+      echo "ERROR: $name has reference-local stash entries that would be lost." >&2
+      echo "reference-to-managed.sh rebuilds from the upstream primary branch. Clear the stash or keep using the managed bootstrap path if local reference state must be preserved." >&2
+      release_entry_lock "$name"
+      return 1
+    fi
     if [ "$state" != "reference-clean" ]; then
       state_workflow "$name" >&2 || true
       echo >&2
@@ -1107,7 +1186,7 @@ reference_to_managed_workflow() {
 state_workflow() {
   local name="$1"
 
-  load_entry_state "$name"
+  load_entry_state "$name" || return 1
 
   case "$_FORKER_ENTRY_STATUS" in
     missing)
@@ -1196,6 +1275,14 @@ state_workflow() {
       echo "  primary      $_FORKER_ENTRY_BASELINE_REF"
       echo "  remote_head  ${_FORKER_ENTRY_REMOTE_HEAD_REF:-unknown}"
       echo "  readonly     $_FORKER_ENTRY_READONLY"
+      return 1
+      ;;
+    reference-stashed)
+      echo "$name: reference clone has stash entries that sync preserves but destructive workflows reject:"
+      echo "  primary      $_FORKER_ENTRY_BASELINE_REF"
+      echo "  remote_head  ${_FORKER_ENTRY_REMOTE_HEAD_REF:-unknown}"
+      echo "  readonly     $_FORKER_ENTRY_READONLY"
+      git -C "$_FORKER_ENTRY_REPO" stash list 2>/dev/null || true
       return 1
       ;;
     reference-clean)
@@ -1305,14 +1392,11 @@ pins_to_missing_wips_workflow() {
 
 wip_to_series_workflow() {
   local name="$1"
-  local mode repo_path pin_path bootstrap=0 current_branch="" pinned_head_sha="" base_commit current_head=""
+  local repo_path pin_path bootstrap=0 current_branch="" pinned_head_sha="" base_commit current_head=""
   local work_dir tmp_repo tmp_pin tmp_series bootstrap_repo bootstrap_pin bootstrap_log
   local before_series_count=0 series_count new_head boot_base_commit
-  mode=$(entry_mode "$name")
-  if [ "$mode" != "managed" ]; then
-    echo "ERROR: $name is a reference entry. Managed pins are required to save a commit series." >&2
-    return 1
-  fi
+
+  require_managed_entry "$name" || return 1
 
   load_managed_clone_context "$name" repo_path pin_path || return 1
   acquire_entry_lock "$name" || return 1
@@ -1423,15 +1507,12 @@ series_to_branch_workflow() {
   local name="$1"
   shift
 
-  local mode repo_path pin_path pinned_head_sha local_base current_branch current_head
+  local repo_path pin_path pinned_head_sha local_base current_branch current_head
   local target="${1:-}" target_start target_work saved_count target_count common_prefix
   local -a wip_commits=() commits_to_push=()
   local commit_count fork_remote
-  mode=$(entry_mode "$name")
-  if [ "$mode" != "managed" ]; then
-    echo "ERROR: $name is a reference entry and cannot use series-to-branch.sh." >&2
-    return 1
-  fi
+
+  require_managed_entry "$name" || return 1
 
   acquire_entry_lock "$name" || return 1
   load_pinned_wip_context "$name" repo_path pin_path pinned_head_sha local_base current_branch current_head || {
@@ -1610,9 +1691,14 @@ health_workflow() {
   }
 
   health_clone_state() {
-    load_entry_state "$name"
+    load_entry_state "$name" || {
+      health_error clone "$name" state-load-failed
+      return
+    }
     if [ "$_FORKER_ENTRY_STATUS" = "missing" ]; then
       health_warn clone "$name" missing
+    elif [ "$_FORKER_ENTRY_STATUS" = "reference-stashed" ]; then
+      health_warn clone "$name" reference-stash
     elif [ "$_FORKER_ENTRY_STATUS" = "reference-writable" ]; then
       health_error clone "$name" writable-reference
     elif [ "$_FORKER_ENTRY_STATUS" = "local-series-has-merges" ]; then

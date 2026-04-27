@@ -23,6 +23,10 @@ write_config_json() {
   mv "$tmp" "$FORKS_DIR/config.json"
 }
 
+entry_exists() {
+  jq -e --arg name "$1" 'has($name)' "$FORKS_DIR/config.json" >/dev/null 2>&1
+}
+
 set_entry_mode_reference() {
   local name="$1"
 
@@ -33,6 +37,12 @@ set_entry_mode_managed() {
   local name="$1" base_branch="$2"
 
   jq --arg name "$name" --arg base_branch "$base_branch" '.[$name] |= (.mode = "managed" | .base_branch = $base_branch | .refs = (.refs // []))' "$FORKS_DIR/config.json" | write_config_json
+}
+
+delete_config_entry() {
+  local name="$1"
+
+  jq --arg name "$name" 'del(.[$name])' "$FORKS_DIR/config.json" | write_config_json
 }
 
 entry_mode() {

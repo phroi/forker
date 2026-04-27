@@ -354,6 +354,10 @@ NEW_REF_SHA=$(git -C "$FORKS_ROOT/reference/repo" rev-parse HEAD)
 chmod -R u+w "$FORKS_ROOT/reference/repo"
 printf '%s\n' 'stash-only change' >> "$FORKS_ROOT/reference/repo/README.md"
 git -C "$FORKS_ROOT/reference/repo" stash push --include-untracked -m temp >/dev/null 2>&1
+run_cmd bash "$FORKER_ROOT/state.sh" reference
+assert_status 1 "state.sh should surface stash-only reference state"
+assert_contains "$CMD_OUTPUT" 'reference clone has stash entries that sync preserves but destructive workflows reject' "state.sh should explain reference stash state"
+assert_contains "$CMD_OUTPUT" 'stash@{0}: On main: temp' "state.sh should show reference stash entries"
 run_cmd bash "$FORKER_ROOT/sync-reference.sh" reference
 assert_status 0 "sync-reference.sh should ignore stash-only drift in reference clones"
 assert_contains "$CMD_OUTPUT" $'reference\tupdated\t' "sync-reference.sh should relock a writable reference clone"
@@ -377,6 +381,10 @@ assert_contains "$CMD_OUTPUT" 'reference clone is writable but should be read-on
 
 printf '%s\n' 'manual override change' >> "$FORKS_ROOT/branchy_reference/repo/README.md"
 touch "$FORKS_ROOT/branchy_reference/repo/extra.tmp"
+run_cmd bash "$FORKER_ROOT/remove-reference.sh" branchy_reference
+assert_status 1 "remove-reference.sh should reject drifted reference clones"
+assert_contains "$CMD_OUTPUT" 'ERROR: branchy_reference has local reference state that would be lost.' "remove-reference.sh should explain reference drift loss risk"
+[ -d "$FORKS_ROOT/branchy_reference/repo/.git" ] || fail "remove-reference.sh should leave drifted reference clones in place on failure"
 run_cmd bash "$FORKER_ROOT/sync-reference.sh" branchy_reference
 assert_status 0 "sync-reference.sh should discard local reference worktree drift"
 assert_contains "$CMD_OUTPUT" $'branchy_reference\tupdated\t' "sync-reference.sh should report resetting reference drift"
@@ -420,6 +428,55 @@ chmod -R a-w "$FORKS_ROOT/reference/repo"
 run_cmd bash "$FORKER_ROOT/sync-all-references.sh"
 assert_status 0 "sync-all-references.sh should complete when entries are healthy"
 assert_contains "$CMD_OUTPUT" $'summary\tupdated=0\tcloned=0\tunchanged=3\tskipped=0\tfailed=0' "sync-all-references.sh should print an aggregate summary"
+
+run_cmd bash "$FORKER_ROOT/state.sh" does_not_exist
+assert_status 1 "state.sh should reject unknown entries"
+assert_contains "$CMD_OUTPUT" 'ERROR: does_not_exist is not configured.' "state.sh should explain missing config entries"
+
+run_cmd bash "$FORKER_ROOT/sync-reference.sh" does_not_exist
+assert_status 1 "sync-reference.sh should reject unknown entries"
+assert_contains "$CMD_OUTPUT" 'ERROR: does_not_exist is not configured.' "sync-reference.sh should explain missing config entries"
+
+run_cmd bash "$FORKER_ROOT/wip-to-series.sh" does_not_exist
+assert_status 1 "wip-to-series.sh should reject unknown entries"
+assert_contains "$CMD_OUTPUT" 'ERROR: does_not_exist is not configured.' "wip-to-series.sh should explain missing config entries"
+
+chmod -R u+w "$FORKS_ROOT/reference/repo"
+git -C "$FORKS_ROOT/reference/repo" stash clear >/dev/null 2>&1
+chmod -R a-w "$FORKS_ROOT/reference/repo"
+
+tmp="$FORKS_ROOT/config.json.tmp"
+jq --arg upstream "file://$REF_BARE" '.missing_reference = {"upstream": $upstream, "mode": "reference"}' "$FORKS_ROOT/config.json" > "$tmp"
+mv "$tmp" "$FORKS_ROOT/config.json"
+
+run_cmd bash "$FORKER_ROOT/remove-reference.sh" missing_reference reference
+assert_status 0 "remove-reference.sh should remove multiple explicit reference entries"
+assert_contains "$CMD_OUTPUT" 'missing_reference: removed reference entry' "remove-reference.sh should remove missing reference entries from config"
+assert_contains "$CMD_OUTPUT" 'reference: removed reference entry' "remove-reference.sh should remove existing reference entries"
+assert_contains "$CMD_OUTPUT" $'summary\tremoved=2\tfailed=0' "remove-reference.sh should summarize multi-entry removal"
+assert_equals "$(jq -r 'has("missing_reference")' "$FORKS_ROOT/config.json")" 'false' "remove-reference.sh should delete missing reference entries from config"
+assert_equals "$(jq -r 'has("reference")' "$FORKS_ROOT/config.json")" 'false' "remove-reference.sh should delete removed reference entries from config"
+[ ! -e "$FORKS_ROOT/missing_reference" ] || fail "remove-reference.sh should tolerate already-missing reference directories"
+[ ! -d "$FORKS_ROOT/reference" ] || fail "remove-reference.sh should delete removed reference directories"
+
+chmod -R u+w "$FORKS_ROOT/branchy_reference/repo"
+printf '%s\n' 'stash removal blocker' >> "$FORKS_ROOT/branchy_reference/repo/README.md"
+git -C "$FORKS_ROOT/branchy_reference/repo" stash push --include-untracked -m 'reference removal blocker' >/dev/null 2>&1
+chmod -R a-w "$FORKS_ROOT/branchy_reference/repo"
+run_cmd bash "$FORKER_ROOT/remove-reference.sh" branchy_reference
+assert_status 1 "remove-reference.sh should reject reference clones with stash entries"
+assert_contains "$CMD_OUTPUT" 'reference-local stash entries that would be lost' "remove-reference.sh should explain stash loss risk"
+assert_equals "$(jq -r 'has("branchy_reference")' "$FORKS_ROOT/config.json")" 'true' "remove-reference.sh should leave the config entry in place on failure"
+[ -d "$FORKS_ROOT/branchy_reference/repo/.git" ] || fail "remove-reference.sh should leave the live repo in place on failure"
+
+chmod -R u+w "$FORKS_ROOT/branchy_reference/repo"
+git -C "$FORKS_ROOT/branchy_reference/repo" stash drop >/dev/null 2>&1
+chmod -R a-w "$FORKS_ROOT/branchy_reference/repo"
+run_cmd bash "$FORKER_ROOT/remove-reference.sh" branchy_reference
+assert_status 0 "remove-reference.sh should remove clean reference entries"
+assert_contains "$CMD_OUTPUT" 'branchy_reference: removed reference entry' "remove-reference.sh should report the removed entry"
+assert_equals "$(jq -r 'has("branchy_reference")' "$FORKS_ROOT/config.json")" 'false' "remove-reference.sh should delete the config entry"
+[ ! -d "$FORKS_ROOT/branchy_reference" ] || fail "remove-reference.sh should delete the live entry directory"
 
 run_cmd bash "$FORKER_ROOT/reference-to-managed.sh" convertible_reference
 assert_status 0 "reference-to-managed.sh should convert a reference entry into a managed clone"
