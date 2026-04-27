@@ -8,6 +8,7 @@ require_managed_entry() {
   local name="$1"
   local mode
 
+  require_configured_entry "$name" || return 1
   mode=$(entry_mode "$name")
   if [ "$mode" != "managed" ]; then
     echo "ERROR: $name is a reference entry. Use 'bash $TOOL_REL/sync-reference.sh $name'." >&2
@@ -19,9 +20,17 @@ require_reference_entry() {
   local name="$1"
   local mode
 
+  require_configured_entry "$name" || return 1
   mode=$(entry_mode "$name")
   if [ "$mode" != "reference" ]; then
     echo "ERROR: $name is a managed entry. Use 'bash $TOOL_REL/managed-to-reference.sh $name'." >&2
+    return 1
+  fi
+}
+
+require_configured_entry() {
+  if ! entry_exists "$1"; then
+    echo "ERROR: $1 is not configured." >&2
     return 1
   fi
 }
@@ -86,6 +95,7 @@ sync_reference_repo_unlocked() {
 load_entry_state() {
   local name="$1"
 
+  require_configured_entry "$name" || return 1
   _FORKER_ENTRY_NAME="$name"
   _FORKER_ENTRY_MODE=$(entry_mode "$name")
   _FORKER_ENTRY_REPO=$(live_repo_dir "$name")
@@ -925,6 +935,7 @@ sync_reference_workflow() {
   local name="$1"
   local mode upstream real_repo remote_head_branch old_sha new_sha current_sha detail old_primary old_readonly
 
+  require_configured_entry "$name" || return 1
   mode=$(entry_mode "$name")
   upstream=$(upstream_url "$name")
   real_repo=$(live_repo_dir "$name")
@@ -1025,6 +1036,41 @@ managed_to_reference_workflow() {
   release_entry_lock "$name"
 
   echo "$name: converted to reference at $head_sha ($_FORKER_REFERENCE_PRIMARY_BRANCH)"
+}
+
+remove_reference_workflow() {
+  local name="$1"
+  local real_entry real_repo
+
+  require_reference_entry "$name" || return 1
+
+  acquire_entry_lock "$name" || return 1
+  real_entry=$(entry_dir "$name")
+  real_repo=$(live_repo_dir "$name")
+
+  if [ -d "$real_repo/.git" ] && repo_has_stash "$real_repo"; then
+    echo "ERROR: $name has reference-local stash entries that would be lost." >&2
+    echo "Clear the stash before removing the entry." >&2
+    release_entry_lock "$name"
+    return 1
+  fi
+
+  chmod -R u+w "$real_entry" 2>/dev/null || true
+  rm -rf "$real_entry" || {
+    release_entry_lock "$name"
+    echo "ERROR: could not remove the live entry directory for $name." >&2
+    return 1
+  }
+
+  delete_config_entry "$name" || {
+    release_entry_lock "$name"
+    echo "ERROR: removed $name/ but could not rewrite forks/config.json." >&2
+    echo "Rerun 'bash $TOOL_REL/remove-reference.sh $name' or restore the entry manually." >&2
+    return 1
+  }
+
+  release_entry_lock "$name"
+  echo "$name: removed reference entry"
 }
 
 reference_to_managed_workflow() {
@@ -1305,14 +1351,11 @@ pins_to_missing_wips_workflow() {
 
 wip_to_series_workflow() {
   local name="$1"
-  local mode repo_path pin_path bootstrap=0 current_branch="" pinned_head_sha="" base_commit current_head=""
+  local repo_path pin_path bootstrap=0 current_branch="" pinned_head_sha="" base_commit current_head=""
   local work_dir tmp_repo tmp_pin tmp_series bootstrap_repo bootstrap_pin bootstrap_log
   local before_series_count=0 series_count new_head boot_base_commit
-  mode=$(entry_mode "$name")
-  if [ "$mode" != "managed" ]; then
-    echo "ERROR: $name is a reference entry. Managed pins are required to save a commit series." >&2
-    return 1
-  fi
+
+  require_managed_entry "$name" || return 1
 
   load_managed_clone_context "$name" repo_path pin_path || return 1
   acquire_entry_lock "$name" || return 1
@@ -1423,15 +1466,12 @@ series_to_branch_workflow() {
   local name="$1"
   shift
 
-  local mode repo_path pin_path pinned_head_sha local_base current_branch current_head
+  local repo_path pin_path pinned_head_sha local_base current_branch current_head
   local target="${1:-}" target_start target_work saved_count target_count common_prefix
   local -a wip_commits=() commits_to_push=()
   local commit_count fork_remote
-  mode=$(entry_mode "$name")
-  if [ "$mode" != "managed" ]; then
-    echo "ERROR: $name is a reference entry and cannot use series-to-branch.sh." >&2
-    return 1
-  fi
+
+  require_managed_entry "$name" || return 1
 
   acquire_entry_lock "$name" || return 1
   load_pinned_wip_context "$name" repo_path pin_path pinned_head_sha local_base current_branch current_head || {
