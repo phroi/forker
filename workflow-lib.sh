@@ -209,6 +209,11 @@ load_entry_state() {
     return 0
   fi
 
+  if repo_has_stash "$_FORKER_ENTRY_REPO"; then
+    _FORKER_ENTRY_STATUS="reference-stashed"
+    return 0
+  fi
+
   if [ "$_FORKER_ENTRY_READONLY" != "yes" ]; then
     _FORKER_ENTRY_STATUS="reference-writable"
     return 0
@@ -220,7 +225,7 @@ load_entry_state() {
 managed_clone_is_replaceable() {
   local name="$1"
 
-  load_entry_state "$name"
+  load_entry_state "$name" || return 1
   case "$_FORKER_ENTRY_STATUS" in
     missing|matches-pins|matches-saved-series|clean-upstream-tip|managed-no-pins-clean) return 0 ;;
     *) return 1 ;;
@@ -230,7 +235,7 @@ managed_clone_is_replaceable() {
 entry_state_is_safe() {
   local name="$1"
 
-  load_entry_state "$name"
+  load_entry_state "$name" || return 1
   case "$_FORKER_ENTRY_STATUS" in
     missing|matches-pins|matches-saved-series|clean-upstream-tip|managed-no-pins-clean|reference-clean) return 0 ;;
     *) return 1 ;;
@@ -1040,7 +1045,7 @@ managed_to_reference_workflow() {
 
 remove_reference_workflow() {
   local name="$1"
-  local real_entry real_repo
+  local real_entry real_repo state
 
   require_reference_entry "$name" || return 1
 
@@ -1048,11 +1053,28 @@ remove_reference_workflow() {
   real_entry=$(entry_dir "$name")
   real_repo=$(live_repo_dir "$name")
 
-  if [ -d "$real_repo/.git" ] && repo_has_stash "$real_repo"; then
-    echo "ERROR: $name has reference-local stash entries that would be lost." >&2
-    echo "Clear the stash before removing the entry." >&2
-    release_entry_lock "$name"
-    return 1
+  if [ -d "$real_repo/.git" ]; then
+    load_entry_state "$name" || {
+      release_entry_lock "$name"
+      return 1
+    }
+    state="$_FORKER_ENTRY_STATUS"
+    if [ "$state" = "reference-stashed" ]; then
+      state_workflow "$name" >&2 || true
+      echo >&2
+      echo "ERROR: $name has reference-local stash entries that would be lost." >&2
+      echo "Clear the stash before removing the entry." >&2
+      release_entry_lock "$name"
+      return 1
+    fi
+    if [ "$state" != "reference-clean" ] && [ "$state" != "reference-writable" ]; then
+      state_workflow "$name" >&2 || true
+      echo >&2
+      echo "ERROR: $name has local reference state that would be lost." >&2
+      echo "remove-reference.sh only removes missing or clean reference clones." >&2
+      release_entry_lock "$name"
+      return 1
+    fi
   fi
 
   chmod -R u+w "$real_entry" 2>/dev/null || true
@@ -1093,8 +1115,19 @@ reference_to_managed_workflow() {
   fi
 
   if [ -d "$real_repo/.git" ]; then
-    load_entry_state "$name"
+    load_entry_state "$name" || {
+      release_entry_lock "$name"
+      return 1
+    }
     state="$_FORKER_ENTRY_STATUS"
+    if [ "$state" = "reference-stashed" ]; then
+      state_workflow "$name" >&2 || true
+      echo >&2
+      echo "ERROR: $name has reference-local stash entries that would be lost." >&2
+      echo "reference-to-managed.sh rebuilds from the upstream primary branch. Clear the stash or keep using the managed bootstrap path if local reference state must be preserved." >&2
+      release_entry_lock "$name"
+      return 1
+    fi
     if [ "$state" != "reference-clean" ]; then
       state_workflow "$name" >&2 || true
       echo >&2
@@ -1153,7 +1186,7 @@ reference_to_managed_workflow() {
 state_workflow() {
   local name="$1"
 
-  load_entry_state "$name"
+  load_entry_state "$name" || return 1
 
   case "$_FORKER_ENTRY_STATUS" in
     missing)
@@ -1242,6 +1275,14 @@ state_workflow() {
       echo "  primary      $_FORKER_ENTRY_BASELINE_REF"
       echo "  remote_head  ${_FORKER_ENTRY_REMOTE_HEAD_REF:-unknown}"
       echo "  readonly     $_FORKER_ENTRY_READONLY"
+      return 1
+      ;;
+    reference-stashed)
+      echo "$name: reference clone has stash entries that sync preserves but destructive workflows reject:"
+      echo "  primary      $_FORKER_ENTRY_BASELINE_REF"
+      echo "  remote_head  ${_FORKER_ENTRY_REMOTE_HEAD_REF:-unknown}"
+      echo "  readonly     $_FORKER_ENTRY_READONLY"
+      git -C "$_FORKER_ENTRY_REPO" stash list 2>/dev/null || true
       return 1
       ;;
     reference-clean)
@@ -1650,9 +1691,14 @@ health_workflow() {
   }
 
   health_clone_state() {
-    load_entry_state "$name"
+    load_entry_state "$name" || {
+      health_error clone "$name" state-load-failed
+      return
+    }
     if [ "$_FORKER_ENTRY_STATUS" = "missing" ]; then
       health_warn clone "$name" missing
+    elif [ "$_FORKER_ENTRY_STATUS" = "reference-stashed" ]; then
+      health_warn clone "$name" reference-stash
     elif [ "$_FORKER_ENTRY_STATUS" = "reference-writable" ]; then
       health_error clone "$name" writable-reference
     elif [ "$_FORKER_ENTRY_STATUS" = "local-series-has-merges" ]; then

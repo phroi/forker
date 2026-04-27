@@ -354,6 +354,10 @@ NEW_REF_SHA=$(git -C "$FORKS_ROOT/reference/repo" rev-parse HEAD)
 chmod -R u+w "$FORKS_ROOT/reference/repo"
 printf '%s\n' 'stash-only change' >> "$FORKS_ROOT/reference/repo/README.md"
 git -C "$FORKS_ROOT/reference/repo" stash push --include-untracked -m temp >/dev/null 2>&1
+run_cmd bash "$FORKER_ROOT/state.sh" reference
+assert_status 1 "state.sh should surface stash-only reference state"
+assert_contains "$CMD_OUTPUT" 'reference clone has stash entries that sync preserves but destructive workflows reject' "state.sh should explain reference stash state"
+assert_contains "$CMD_OUTPUT" 'stash@{0}: On main: temp' "state.sh should show reference stash entries"
 run_cmd bash "$FORKER_ROOT/sync-reference.sh" reference
 assert_status 0 "sync-reference.sh should ignore stash-only drift in reference clones"
 assert_contains "$CMD_OUTPUT" $'reference\tupdated\t' "sync-reference.sh should relock a writable reference clone"
@@ -377,6 +381,10 @@ assert_contains "$CMD_OUTPUT" 'reference clone is writable but should be read-on
 
 printf '%s\n' 'manual override change' >> "$FORKS_ROOT/branchy_reference/repo/README.md"
 touch "$FORKS_ROOT/branchy_reference/repo/extra.tmp"
+run_cmd bash "$FORKER_ROOT/remove-reference.sh" branchy_reference
+assert_status 1 "remove-reference.sh should reject drifted reference clones"
+assert_contains "$CMD_OUTPUT" 'ERROR: branchy_reference has local reference state that would be lost.' "remove-reference.sh should explain reference drift loss risk"
+[ -d "$FORKS_ROOT/branchy_reference/repo/.git" ] || fail "remove-reference.sh should leave drifted reference clones in place on failure"
 run_cmd bash "$FORKER_ROOT/sync-reference.sh" branchy_reference
 assert_status 0 "sync-reference.sh should discard local reference worktree drift"
 assert_contains "$CMD_OUTPUT" $'branchy_reference\tupdated\t' "sync-reference.sh should report resetting reference drift"
