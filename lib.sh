@@ -3,11 +3,36 @@
 # Shared helper functions for the forker scripts. Keep this file focused on
 # config access, pin/clone path resolution, and deterministic replay helpers.
 
+discover_forks_dir() {
+  local search_dir="$1"
+  local candidate
+
+  candidate="$(cd "$search_dir/../.." && pwd)"
+  if [ -f "$candidate/config.json" ]; then
+    echo "$candidate"
+    return 0
+  fi
+
+  candidate="$search_dir"
+  while [ "$candidate" != "/" ]; do
+    if [ -f "$candidate/forks/config.json" ]; then
+      echo "$candidate/forks"
+      return 0
+    fi
+    candidate=$(dirname "$candidate")
+  done
+
+  echo "$(cd "$search_dir/../.." && pwd)"
+}
+
 FORKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENTRY_DIR="$(cd "$FORKER_DIR/.." && pwd)"
-FORKS_DIR="$(cd "$ENTRY_DIR/.." && pwd)"
-TOOL_REL="forks/$(basename "$ENTRY_DIR")/repo"
+FORKS_DIR="${FORKER_FORKS_DIR:-$(discover_forks_dir "$FORKER_DIR")}"
 ROOT_DIR="$(cd "$FORKS_DIR/.." && pwd)"
+case "$FORKER_DIR" in
+  "$FORKS_DIR"/*/repo) TOOL_REL="forks/$(basename "$ENTRY_DIR")/repo" ;;
+  *) TOOL_REL="$FORKER_DIR" ;;
+esac
 PACKAGE_ROOT="${FORKER_PACKAGE_ROOT:-$ROOT_DIR}"
 
 config_val() {
