@@ -14,11 +14,12 @@ discover_forks_dir() {
   fi
 
   candidate="$search_dir"
-  while [ "$candidate" != "/" ]; do
+  while true; do
     if [ -f "$candidate/forks/config.json" ]; then
       echo "$candidate/forks"
       return 0
     fi
+    [ "$candidate" = "/" ] && break
     candidate=$(dirname "$candidate")
   done
 
