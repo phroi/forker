@@ -31,7 +31,7 @@ ENTRY_DIR="$(cd "$FORKER_DIR/.." && pwd)"
 FORKS_DIR="${FORKER_FORKS_DIR:-$(discover_forks_dir "$FORKER_DIR")}"
 ROOT_DIR="$(cd "$FORKS_DIR/.." && pwd)"
 case "$FORKER_DIR" in
-  "$FORKS_DIR"/*/repo) TOOL_REL="forks/$(basename "$ENTRY_DIR")/repo" ;;
+  "$FORKS_DIR"/*/repo) TOOL_REL="$(basename "$FORKS_DIR")/$(basename "$ENTRY_DIR")/repo" ;;
   *) TOOL_REL="$FORKER_DIR" ;;
 esac
 PACKAGE_ROOT="${FORKER_PACKAGE_ROOT:-$ROOT_DIR}"

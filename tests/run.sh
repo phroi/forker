@@ -350,6 +350,20 @@ assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=1\tskipped=0\tfailed=0' "b
 [ -d "$BOOTSTRAP_SCRATCH_FORKS/reference/repo/.git" ] || fail "bootstrap-workspace.sh should clone reference entries from a scratch tool checkout"
 [ -d "$BOOTSTRAP_SCRATCH_FORKS/managed/repo/.git" ] || fail "bootstrap-workspace.sh should materialize managed entries from a scratch tool checkout"
 
+CUSTOM_LAYOUT_FORKS="$ROOT/custom-layout/phroi-worktrees"
+CUSTOM_LAYOUT_FORKER="$CUSTOM_LAYOUT_FORKS/phroi_forker/repo"
+
+mkdir -p "$CUSTOM_LAYOUT_FORKER"
+cp -a "$SOURCE_FORKER"/. "$CUSTOM_LAYOUT_FORKER/"
+rm -rf "$CUSTOM_LAYOUT_FORKER/.git"
+printf '{}\n' > "$CUSTOM_LAYOUT_FORKS/config.json"
+
+run_cmd bash -c 'set -euo pipefail
+source "$1/lib.sh"
+printf "%s\n" "$TOOL_REL"' _ "$CUSTOM_LAYOUT_FORKER"
+assert_status 0 "lib.sh should resolve TOOL_REL from a custom forks directory name"
+assert_equals "$CMD_OUTPUT" 'phroi-worktrees/phroi_forker/repo' "lib.sh should use the discovered forks directory basename in TOOL_REL"
+
 run_cmd bash -c 'set -euo pipefail
 source "$1/lib.sh"
 source "$1/workflow-lib.sh"
