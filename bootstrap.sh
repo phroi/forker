@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TOOL_NAME="phroi_forker"
+DEFAULT_FORKER_UPSTREAM="${FORKER_BOOTSTRAP_UPSTREAM:-https://github.com/phroi/forker.git}"
+
+fail() {
+  printf 'ERROR: %s\n' "$1" >&2
+  exit 1
+}
+
+require_tool() {
+  command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
+}
+
+repo_root() {
+  git rev-parse --show-toplevel 2>/dev/null || fail "bootstrap.sh must run inside a git repository"
+}
+
+ensure_forks_gitignore() {
+  local path="$1/.gitignore"
+  local line
+
+  mkdir -p "$1"
+  touch "$path"
+
+  for line in '*/repo/' '.stage/' '.lock/'; do
+    grep -Fqx "$line" "$path" || printf '%s\n' "$line" >> "$path"
+  done
+}
+
+write_minimal_config() {
+  cat > "$1" <<EOF
+{
+  "$TOOL_NAME": {
+    "upstream": "$DEFAULT_FORKER_UPSTREAM",
+    "mode": "reference"
+  }
+}
+EOF
+}
+
+validate_config() {
+  jq -e type "$1" >/dev/null 2>&1 || fail "$1 is not valid JSON"
+
+  jq -e 'to_entries | all(.value | (.mode == "managed" or .mode == "reference"))' "$1" >/dev/null 2>&1 \
+    || fail "all forks/config.json entries must declare mode=managed or mode=reference"
+
+  jq -e 'has("forker") | not' "$1" >/dev/null 2>&1 \
+    || fail "legacy 'forker' config entries are not supported; migrate to 'phroi_forker' first"
+}
+
+ensure_config() {
+  local config_path="$1"
+  local tmp
+
+  if [ ! -f "$config_path" ]; then
+    write_minimal_config "$config_path"
+    return 0
+  fi
+
+  validate_config "$config_path"
+
+  if jq -e --arg name "$TOOL_NAME" 'has($name)' "$config_path" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  tmp=$(mktemp "$config_path.tmp.XXXXXX")
+  jq --arg name "$TOOL_NAME" --arg upstream "$DEFAULT_FORKER_UPSTREAM" \
+    '.[$name] = {"upstream": $upstream, "mode": "reference"}' "$config_path" > "$tmp"
+  mv "$tmp" "$config_path"
+}
+
+tool_upstream() {
+  jq -r --arg name "$TOOL_NAME" '.[$name].upstream // empty' "$1"
+}
+
+fetch_bootstrap_tool() {
+  local forks_dir="$1"
+  local config_path="$2"
+  local stage_tool="$forks_dir/.stage/bootstrap-$TOOL_NAME"
+  local upstream
+
+  upstream=$(tool_upstream "$config_path")
+  [ -n "$upstream" ] || upstream="$DEFAULT_FORKER_UPSTREAM"
+
+  rm -rf "$stage_tool"
+  mkdir -p "$stage_tool"
+  git clone --filter=blob:none --depth 1 "$upstream" "$stage_tool/repo" >/dev/null 2>&1 \
+    || fail "could not clone phroi_forker from $upstream"
+  printf '%s\n' "$stage_tool/repo"
+}
+
+main() {
+  local root_dir forks_dir config_path tool_dir temp_tool_dir
+
+  require_tool git
+  require_tool jq
+
+  root_dir=$(repo_root)
+  forks_dir="$root_dir/forks"
+  config_path="$forks_dir/config.json"
+
+  ensure_forks_gitignore "$forks_dir"
+  ensure_config "$config_path"
+
+  tool_dir=$(fetch_bootstrap_tool "$forks_dir" "$config_path")
+  temp_tool_dir="$(dirname "$tool_dir")"
+
+  bash "$tool_dir/materialize-workspace.sh"
+  rm -rf "$temp_tool_dir"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

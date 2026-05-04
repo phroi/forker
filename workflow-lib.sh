@@ -1335,6 +1335,97 @@ verify_all_pins_workflow() {
   [ "$failed" -eq 0 ]
 }
 
+bootstrap_workspace_validate_config() {
+  if ! jq -e type "$FORKS_DIR/config.json" >/dev/null 2>&1; then
+    echo "ERROR: $FORKS_DIR/config.json is not valid JSON." >&2
+    return 1
+  fi
+
+  if ! jq -e 'to_entries | all(.value | (.mode == "managed" or .mode == "reference"))' "$FORKS_DIR/config.json" >/dev/null 2>&1; then
+    echo "ERROR: all forks/config.json entries must declare mode=managed or mode=reference." >&2
+    return 1
+  fi
+
+  if jq -e 'has("forker")' "$FORKS_DIR/config.json" >/dev/null 2>&1; then
+    echo "ERROR: legacy 'forker' config entries are not supported. Migrate to 'phroi_forker' first." >&2
+    return 1
+  fi
+}
+
+bootstrap_workspace_pin_state() {
+  local pin_path="$1"
+  local has_manifest=0 has_head=0 has_local_base=0 saved_series=0 resolutions=0
+
+  [ -f "$pin_path/manifest" ] && has_manifest=1
+  [ -f "$pin_path/HEAD" ] && has_head=1
+  [ -f "$pin_path/LOCAL_BASE" ] && has_local_base=1
+  saved_series=$(saved_series_count "$pin_path")
+  resolutions=$(count_glob "$pin_path"/res-*.resolution)
+
+  if has_legacy_local_patches "$pin_path"; then
+    echo legacy
+  elif [ "$saved_series" -gt 0 ] && [ "$has_manifest" -eq 0 ] && [ "$has_head" -eq 0 ] && [ "$has_local_base" -eq 0 ]; then
+    echo broken
+  elif [ "$resolutions" -gt 0 ] && [ "$has_manifest" -eq 0 ] && [ "$has_head" -eq 0 ] && [ "$has_local_base" -eq 0 ]; then
+    echo broken
+  elif [ "$has_manifest" -ne "$has_head" ] || [ "$has_manifest" -ne "$has_local_base" ]; then
+    echo broken
+  elif [ "$has_manifest" -eq 1 ]; then
+    echo present
+  else
+    echo missing
+  fi
+}
+
+bootstrap_missing_managed_pins_workflow() {
+  local derived=0 skipped=0 failed=0 status line pin_state
+  local name
+
+  while IFS= read -r name; do
+    pin_state=$(bootstrap_workspace_pin_state "$(live_pin_dir "$name")")
+
+    case "$pin_state" in
+      present)
+        printf '%s\tskipped\tpins already present\n' "$name"
+        skipped=$((skipped + 1))
+        continue
+        ;;
+      missing)
+        ;;
+      *)
+        printf '%s\tfailed\texisting pin state is incomplete or inconsistent\n' "$name"
+        failed=$((failed + 1))
+        continue
+        ;;
+    esac
+
+    line=$(upstream_to_pins_workflow "$name" 1 2>&1) || status=$?
+    status=${status:-0}
+    printf '%s\n' "$line"
+
+    if [ "$status" -eq 0 ]; then
+      derived=$((derived + 1))
+    else
+      failed=$((failed + 1))
+    fi
+
+    unset status
+  done < <(managed_entries)
+
+  printf 'summary\tderived=%d\tskipped=%d\tfailed=%d\n' "$derived" "$skipped" "$failed"
+  [ "$failed" -eq 0 ]
+}
+
+bootstrap_workspace_workflow() {
+  local status=0
+
+  bootstrap_workspace_validate_config || return 1
+  sync_all_references_workflow || status=1
+  bootstrap_missing_managed_pins_workflow || status=1
+  pins_to_missing_wips_workflow || status=1
+  [ "$status" -eq 0 ]
+}
+
 sync_all_references_workflow() {
   local updated=0 cloned=0 unchanged=0 skipped=0 failed=0
   local name

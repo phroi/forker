@@ -20,7 +20,8 @@ Only `forks/<name>/{repo,pin}` is live state. `forks/.stage/` is disposable scra
 
 ## Use This When
 
-- Full workspace bootstrap: `bash forks/phroi_forker/repo/bootstrap-workspace.sh`
+- Self-contained bootstrap from a plain git checkout: `curl -fsSL https://raw.githubusercontent.com/phroi/forker/master/bootstrap.sh | bash`
+- Local workspace materialization once the tool is present: `bash forks/phroi_forker/repo/materialize-workspace.sh`
 - Refresh all references: `bash forks/phroi_forker/repo/sync-all-references.sh`
 - Refresh one reference clone: `bash forks/phroi_forker/repo/sync-reference.sh <name>`
 - Remove one or more reference entries entirely: `bash forks/phroi_forker/repo/remove-reference.sh <name> [name ...]`
@@ -75,6 +76,7 @@ forks/<name>/pin/
 
 ## Notes
 
+- `bootstrap.sh` requires `git` and `jq`. It creates `forks/` when missing, ensures `forks/.gitignore`, fetches a temporary latest `phroi_forker` checkout, then delegates to `materialize-workspace.sh`.
 - Conflicted record/bootstrap paths shell out through `pnpm coworker:ask`; there is no standalone `coworker_ask` binary.
 - Replay and verify reuse recorded `res-N.resolution` data.
 - If a recorded merge SHA can no longer be fetched from upstream, rerun `rebuild-pins.sh`.
