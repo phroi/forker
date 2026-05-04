@@ -4,6 +4,7 @@ set -euo pipefail
 TOOL_NAME="phroi_forker"
 DEFAULT_FORKER_UPSTREAM="${FORKER_BOOTSTRAP_UPSTREAM:-https://github.com/phroi/forker.git}"
 BOOTSTRAP_TEMP_DIR=""
+BOOTSTRAP_TOOL_DIR=""
 
 fail() {
   printf 'ERROR: %s\n' "$1" >&2
@@ -97,15 +98,16 @@ fetch_bootstrap_tool() {
   upstream=$(tool_upstream "$config_path")
   [ -n "$upstream" ] || upstream="$DEFAULT_FORKER_UPSTREAM"
 
+  BOOTSTRAP_TEMP_DIR="$stage_tool"
   rm -rf "$stage_tool"
   mkdir -p "$stage_tool"
-  git clone --filter=blob:none --depth 1 "$upstream" "$stage_tool/repo" >/dev/null 2>&1 \
+  git clone --filter=blob:none --depth 1 "$upstream" "$stage_tool/repo" >/dev/null \
     || fail "could not clone phroi_forker from $upstream"
-  printf '%s\n' "$stage_tool/repo"
+  BOOTSTRAP_TOOL_DIR="$stage_tool/repo"
 }
 
 main() {
-  local root_dir forks_dir config_path tool_dir temp_tool_dir
+  local root_dir forks_dir config_path
 
   require_tool git
   require_tool jq
@@ -118,13 +120,12 @@ main() {
   ensure_forks_gitignore "$forks_dir"
   ensure_config "$config_path"
 
-  tool_dir=$(fetch_bootstrap_tool "$forks_dir" "$config_path")
-  temp_tool_dir="$(dirname "$tool_dir")"
-  BOOTSTRAP_TEMP_DIR="$temp_tool_dir"
+  fetch_bootstrap_tool "$forks_dir" "$config_path"
 
-  bash "$tool_dir/materialize-workspace.sh"
+  bash "$BOOTSTRAP_TOOL_DIR/materialize-workspace.sh"
   cleanup_bootstrap_temp
   BOOTSTRAP_TEMP_DIR=""
+  BOOTSTRAP_TOOL_DIR=""
 }
 
 if [ "${BASH_SOURCE[0]-$0}" = "$0" ]; then
