@@ -366,7 +366,7 @@ mkdir -p "$BOOTSTRAP_SHIM_EMPTY_ROOT/apps/demo"
 
 run_cmd env FORKER_BOOTSTRAP_UPSTREAM="file://$PHROI_FORKER_BARE" bash -c 'set -euo pipefail
 cd "$1/apps/demo"
-bash "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_EMPTY_ROOT" "$SOURCE_FORKER"
+bash < "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_EMPTY_ROOT" "$SOURCE_FORKER"
 assert_status 0 "bootstrap.sh should seed and bootstrap a zero-data repo"
 assert_equals "$(jq -r '.phroi_forker.mode' "$BOOTSTRAP_SHIM_EMPTY_FORKS/config.json")" 'reference' "bootstrap.sh should seed phroi_forker as a reference entry"
 assert_equals "$(jq -r '.phroi_forker.upstream' "$BOOTSTRAP_SHIM_EMPTY_FORKS/config.json")" "file://$PHROI_FORKER_BARE" "bootstrap.sh should seed the configured tool upstream"

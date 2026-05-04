@@ -127,6 +127,6 @@ main() {
   BOOTSTRAP_TEMP_DIR=""
 }
 
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+if [ "${BASH_SOURCE[0]-$0}" = "$0" ]; then
   main "$@"
 fi
