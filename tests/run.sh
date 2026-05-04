@@ -135,6 +135,15 @@ create_repo_from_dir() {
   printf '%s\t%s\n' "$work" "$bare"
 }
 
+init_git_root() {
+  local root="$1"
+
+  mkdir -p "$root"
+  git init "$root" >/dev/null 2>&1
+  git -C "$root" config user.email ci@example.com
+  git -C "$root" config user.name ci
+}
+
 IFS=$'\t' read -r REF_WORK REF_BARE <<< "$(create_upstream reference-upstream main)"
 IFS=$'\t' read -r MANAGED_WORK MANAGED_BARE <<< "$(create_upstream managed-upstream main)"
 IFS=$'\t' read -r MERGED_WORK MERGED_BARE <<< "$(create_upstream merged-upstream main)"
@@ -260,17 +269,16 @@ cat > "$BOOTSTRAP_WORKSPACE_FORKS/config.json" <<JSON
 }
 JSON
 
-bash "$BOOTSTRAP_WORKSPACE_FORKER/upstream-to-pins.sh" phroi_forker >/dev/null 2>&1
-bash "$BOOTSTRAP_WORKSPACE_FORKER/upstream-to-pins.sh" managed >/dev/null 2>&1
 rm -rf "$BOOTSTRAP_WORKSPACE_FORKS/managed/repo" "$BOOTSTRAP_WORKSPACE_FORKS/reference"
 
-run_cmd bash "$BOOTSTRAP_WORKSPACE_FORKER/bootstrap-workspace.sh"
-assert_status 0 "bootstrap-workspace.sh should populate the rest of forks when phroi_forker is already present"
-assert_contains "$CMD_OUTPUT" $'summary\tupdated=0\tcloned=1\tunchanged=0\tskipped=0\tfailed=0' "bootstrap-workspace.sh should sync reference entries"
-assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=1\tskipped=1\tfailed=0' "bootstrap-workspace.sh should materialize missing managed clones and skip existing ones"
-[ -d "$BOOTSTRAP_WORKSPACE_FORKS/phroi_forker/repo/.git" ] || fail "bootstrap-workspace.sh should preserve an existing managed phroi_forker clone"
-[ -d "$BOOTSTRAP_WORKSPACE_FORKS/reference/repo/.git" ] || fail "bootstrap-workspace.sh should clone missing reference entries"
-[ -d "$BOOTSTRAP_WORKSPACE_FORKS/managed/repo/.git" ] || fail "bootstrap-workspace.sh should materialize missing managed entries"
+run_cmd bash "$BOOTSTRAP_WORKSPACE_FORKER/materialize-workspace.sh"
+assert_status 0 "materialize-workspace.sh should populate the rest of forks when phroi_forker is already present"
+assert_contains "$CMD_OUTPUT" $'summary\tupdated=0\tcloned=1\tunchanged=0\tskipped=0\tfailed=0' "materialize-workspace.sh should sync reference entries"
+assert_contains "$CMD_OUTPUT" $'summary\tderived=2\tskipped=0\tfailed=0' "materialize-workspace.sh should derive missing managed pins before materializing"
+assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=0\tskipped=2\tfailed=0' "materialize-workspace.sh should skip managed clones once upstream pin bootstrap published them"
+[ -d "$BOOTSTRAP_WORKSPACE_FORKS/phroi_forker/repo/.git" ] || fail "materialize-workspace.sh should preserve an existing managed phroi_forker clone"
+[ -d "$BOOTSTRAP_WORKSPACE_FORKS/reference/repo/.git" ] || fail "materialize-workspace.sh should clone missing reference entries"
+[ -d "$BOOTSTRAP_WORKSPACE_FORKS/managed/repo/.git" ] || fail "materialize-workspace.sh should materialize missing managed entries"
 
 BOOTSTRAP_REFERENCE_ROOT="$ROOT/bootstrap-workspace-reference"
 BOOTSTRAP_REFERENCE_FORKS="$BOOTSTRAP_REFERENCE_ROOT/forks"
@@ -302,17 +310,17 @@ cat > "$BOOTSTRAP_REFERENCE_FORKS/config.json" <<JSON
 }
 JSON
 
-bash "$BOOTSTRAP_REFERENCE_FORKER/upstream-to-pins.sh" managed >/dev/null 2>&1
 rm -rf "$BOOTSTRAP_REFERENCE_FORKS/managed/repo" "$BOOTSTRAP_REFERENCE_FORKS/reference"
 
-run_cmd bash "$BOOTSTRAP_REFERENCE_FORKER/bootstrap-workspace.sh"
-assert_status 0 "bootstrap-workspace.sh should bootstrap when phroi_forker is configured as a reference entry"
-assert_contains "$CMD_OUTPUT" $'summary\tupdated=0\tcloned=2\tunchanged=0\tskipped=0\tfailed=0' "bootstrap-workspace.sh should sync phroi_forker and other missing reference entries"
-assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=1\tskipped=0\tfailed=0' "bootstrap-workspace.sh should still materialize managed entries from pins in reference mode"
-[ -d "$BOOTSTRAP_REFERENCE_FORKS/phroi_forker/repo/.git" ] || fail "bootstrap-workspace.sh should materialize a reference-configured phroi_forker clone"
-[ ! -w "$BOOTSTRAP_REFERENCE_FORKS/phroi_forker/repo/README.md" ] || fail "bootstrap-workspace.sh should leave a reference-configured phroi_forker clone read-only"
-[ -d "$BOOTSTRAP_REFERENCE_FORKS/reference/repo/.git" ] || fail "bootstrap-workspace.sh should still clone other reference entries in reference mode"
-[ -d "$BOOTSTRAP_REFERENCE_FORKS/managed/repo/.git" ] || fail "bootstrap-workspace.sh should still materialize managed entries in reference mode"
+run_cmd bash "$BOOTSTRAP_REFERENCE_FORKER/materialize-workspace.sh"
+assert_status 0 "materialize-workspace.sh should bootstrap when phroi_forker is configured as a reference entry"
+assert_contains "$CMD_OUTPUT" $'summary\tupdated=0\tcloned=2\tunchanged=0\tskipped=0\tfailed=0' "materialize-workspace.sh should sync phroi_forker and other missing reference entries"
+assert_contains "$CMD_OUTPUT" $'summary\tderived=1\tskipped=0\tfailed=0' "materialize-workspace.sh should derive missing managed pins in reference mode"
+assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=0\tskipped=1\tfailed=0' "materialize-workspace.sh should skip managed clones after deriving pins in reference mode"
+[ -d "$BOOTSTRAP_REFERENCE_FORKS/phroi_forker/repo/.git" ] || fail "materialize-workspace.sh should materialize a reference-configured phroi_forker clone"
+[ ! -w "$BOOTSTRAP_REFERENCE_FORKS/phroi_forker/repo/README.md" ] || fail "materialize-workspace.sh should leave a reference-configured phroi_forker clone read-only"
+[ -d "$BOOTSTRAP_REFERENCE_FORKS/reference/repo/.git" ] || fail "materialize-workspace.sh should still clone other reference entries in reference mode"
+[ -d "$BOOTSTRAP_REFERENCE_FORKS/managed/repo/.git" ] || fail "materialize-workspace.sh should still materialize managed entries in reference mode"
 
 BOOTSTRAP_SCRATCH_ROOT="$ROOT/bootstrap-workspace-scratch"
 BOOTSTRAP_SCRATCH_FORKS="$BOOTSTRAP_SCRATCH_ROOT/forks"
@@ -340,15 +348,153 @@ cat > "$BOOTSTRAP_SCRATCH_FORKS/config.json" <<JSON
 }
 JSON
 
-bash "$BOOTSTRAP_SCRATCH_FORKER/upstream-to-pins.sh" managed >/dev/null 2>&1
 rm -rf "$BOOTSTRAP_SCRATCH_FORKS/managed/repo" "$BOOTSTRAP_SCRATCH_FORKS/reference"
 
-run_cmd bash "$BOOTSTRAP_SCRATCH_FORKER/bootstrap-workspace.sh"
-assert_status 0 "bootstrap-workspace.sh should work from a scratch clone outside forks/"
-assert_contains "$CMD_OUTPUT" $'summary\tupdated=0\tcloned=1\tunchanged=0\tskipped=0\tfailed=0' "bootstrap-workspace.sh should still sync reference entries from a scratch clone"
-assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=1\tskipped=0\tfailed=0' "bootstrap-workspace.sh should still materialize managed entries from a scratch clone"
-[ -d "$BOOTSTRAP_SCRATCH_FORKS/reference/repo/.git" ] || fail "bootstrap-workspace.sh should clone reference entries from a scratch tool checkout"
-[ -d "$BOOTSTRAP_SCRATCH_FORKS/managed/repo/.git" ] || fail "bootstrap-workspace.sh should materialize managed entries from a scratch tool checkout"
+run_cmd bash "$BOOTSTRAP_SCRATCH_FORKER/materialize-workspace.sh"
+assert_status 0 "materialize-workspace.sh should work from a scratch clone outside forks/"
+assert_contains "$CMD_OUTPUT" $'summary\tupdated=0\tcloned=1\tunchanged=0\tskipped=0\tfailed=0' "materialize-workspace.sh should still sync reference entries from a scratch clone"
+assert_contains "$CMD_OUTPUT" $'summary\tderived=1\tskipped=0\tfailed=0' "materialize-workspace.sh should derive missing managed pins from a scratch clone"
+assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=0\tskipped=1\tfailed=0' "materialize-workspace.sh should skip managed clones after deriving pins from a scratch clone"
+[ -d "$BOOTSTRAP_SCRATCH_FORKS/reference/repo/.git" ] || fail "materialize-workspace.sh should clone reference entries from a scratch tool checkout"
+[ -d "$BOOTSTRAP_SCRATCH_FORKS/managed/repo/.git" ] || fail "materialize-workspace.sh should materialize managed entries from a scratch tool checkout"
+
+BOOTSTRAP_SHIM_EMPTY_ROOT="$ROOT/bootstrap-shim-empty"
+BOOTSTRAP_SHIM_EMPTY_FORKS="$BOOTSTRAP_SHIM_EMPTY_ROOT/forks"
+
+init_git_root "$BOOTSTRAP_SHIM_EMPTY_ROOT"
+mkdir -p "$BOOTSTRAP_SHIM_EMPTY_ROOT/apps/demo"
+
+run_cmd env FORKER_BOOTSTRAP_UPSTREAM="file://$PHROI_FORKER_BARE" bash -c 'set -euo pipefail
+cd "$1/apps/demo"
+bash < "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_EMPTY_ROOT" "$SOURCE_FORKER"
+assert_status 0 "bootstrap.sh should seed and bootstrap a zero-data repo"
+assert_equals "$(jq -r '.phroi_forker.mode' "$BOOTSTRAP_SHIM_EMPTY_FORKS/config.json")" 'reference' "bootstrap.sh should seed phroi_forker as a reference entry"
+assert_equals "$(jq -r '.phroi_forker.upstream' "$BOOTSTRAP_SHIM_EMPTY_FORKS/config.json")" "file://$PHROI_FORKER_BARE" "bootstrap.sh should seed the configured tool upstream"
+[ -d "$BOOTSTRAP_SHIM_EMPTY_FORKS/phroi_forker/repo/.git" ] || fail "bootstrap.sh should materialize the phroi_forker reference clone"
+[ ! -w "$BOOTSTRAP_SHIM_EMPTY_FORKS/phroi_forker/repo/README.md" ] || fail "bootstrap.sh should leave bootstrapped reference clones read-only"
+[ ! -d "$BOOTSTRAP_SHIM_EMPTY_FORKS/.stage/bootstrap-phroi_forker" ] || fail "bootstrap.sh should clean its temporary bootstrap checkout on success"
+assert_contains "$(cat "$BOOTSTRAP_SHIM_EMPTY_FORKS/.gitignore")" '*/repo/' "bootstrap.sh should ensure forks/.gitignore ignores live clones"
+
+BOOTSTRAP_SHIM_GITIGNORE_ROOT="$ROOT/bootstrap-shim-gitignore"
+BOOTSTRAP_SHIM_GITIGNORE_FORKS="$BOOTSTRAP_SHIM_GITIGNORE_ROOT/forks"
+
+init_git_root "$BOOTSTRAP_SHIM_GITIGNORE_ROOT"
+mkdir -p "$BOOTSTRAP_SHIM_GITIGNORE_FORKS"
+printf '%s' 'custom-rule' > "$BOOTSTRAP_SHIM_GITIGNORE_FORKS/.gitignore"
+
+run_cmd env FORKER_BOOTSTRAP_UPSTREAM="file://$PHROI_FORKER_BARE" bash -c 'set -euo pipefail
+cd "$1"
+bash "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_GITIGNORE_ROOT" "$SOURCE_FORKER"
+assert_status 0 "bootstrap.sh should preserve existing gitignore lines without a trailing newline"
+grep -Fqx 'custom-rule' "$BOOTSTRAP_SHIM_GITIGNORE_FORKS/.gitignore" || fail "bootstrap.sh should preserve the last pre-existing gitignore rule"
+grep -Fqx '*/repo/' "$BOOTSTRAP_SHIM_GITIGNORE_FORKS/.gitignore" || fail "bootstrap.sh should add the repo ignore rule after a missing trailing newline"
+
+BOOTSTRAP_SHIM_EXISTING_ROOT="$ROOT/bootstrap-shim-existing"
+BOOTSTRAP_SHIM_EXISTING_FORKS="$BOOTSTRAP_SHIM_EXISTING_ROOT/forks"
+IFS=$'\t' read -r _ BOOTSTRAP_SHIM_REF_BARE <<< "$(create_upstream bootstrap-shim-reference main)"
+IFS=$'\t' read -r _ BOOTSTRAP_SHIM_MANAGED_BARE <<< "$(create_upstream bootstrap-shim-managed main)"
+
+init_git_root "$BOOTSTRAP_SHIM_EXISTING_ROOT"
+mkdir -p "$BOOTSTRAP_SHIM_EXISTING_FORKS"
+cat > "$BOOTSTRAP_SHIM_EXISTING_FORKS/config.json" <<JSON
+{
+  "managed": {
+    "upstream": "file://$BOOTSTRAP_SHIM_MANAGED_BARE",
+    "mode": "managed",
+    "refs": []
+  },
+  "reference": {
+    "upstream": "file://$BOOTSTRAP_SHIM_REF_BARE",
+    "mode": "reference"
+  }
+}
+JSON
+
+run_cmd env FORKER_BOOTSTRAP_UPSTREAM="file://$PHROI_FORKER_BARE" bash -c 'set -euo pipefail
+cd "$1"
+bash "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_EXISTING_ROOT" "$SOURCE_FORKER"
+assert_status 0 "bootstrap.sh should add phroi_forker and bootstrap existing fork configs"
+assert_equals "$(jq -r '.phroi_forker.mode' "$BOOTSTRAP_SHIM_EXISTING_FORKS/config.json")" 'reference' "bootstrap.sh should add phroi_forker as a reference entry"
+if jq -e '.phroi_forker | has("fork") or has("refs") or has("base_branch")' "$BOOTSTRAP_SHIM_EXISTING_FORKS/config.json" >/dev/null 2>&1; then
+  fail "bootstrap.sh should add only minimal phroi_forker fields"
+fi
+assert_contains "$CMD_OUTPUT" $'summary\tderived=1\tskipped=0\tfailed=0' "bootstrap.sh should derive missing managed pins through materialize-workspace.sh"
+[ -f "$BOOTSTRAP_SHIM_EXISTING_FORKS/managed/pin/HEAD" ] || fail "bootstrap.sh should derive managed pin state"
+[ -d "$BOOTSTRAP_SHIM_EXISTING_FORKS/managed/repo/.git" ] || fail "bootstrap.sh should materialize managed repos"
+[ -d "$BOOTSTRAP_SHIM_EXISTING_FORKS/reference/repo/.git" ] || fail "bootstrap.sh should materialize reference repos"
+[ -d "$BOOTSTRAP_SHIM_EXISTING_FORKS/phroi_forker/repo/.git" ] || fail "bootstrap.sh should materialize the tool clone"
+
+BOOTSTRAP_SHIM_INVALID_ROOT="$ROOT/bootstrap-shim-invalid"
+BOOTSTRAP_SHIM_INVALID_FORKS="$BOOTSTRAP_SHIM_INVALID_ROOT/forks"
+
+init_git_root "$BOOTSTRAP_SHIM_INVALID_ROOT"
+mkdir -p "$BOOTSTRAP_SHIM_INVALID_FORKS"
+cat > "$BOOTSTRAP_SHIM_INVALID_FORKS/config.json" <<JSON
+{
+  "broken": {
+    "upstream": "file://$BOOTSTRAP_SHIM_MANAGED_BARE"
+  }
+}
+JSON
+
+run_cmd env FORKER_BOOTSTRAP_UPSTREAM="file://$PHROI_FORKER_BARE" bash -c 'set -euo pipefail
+cd "$1"
+bash "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_INVALID_ROOT" "$SOURCE_FORKER"
+assert_status 1 "bootstrap.sh should reject configs without explicit modes"
+assert_contains "$CMD_OUTPUT" 'all forks/config.json entries must declare mode=managed or mode=reference' "bootstrap.sh should explain invalid mode configuration"
+[ ! -d "$BOOTSTRAP_SHIM_INVALID_FORKS/.stage/bootstrap-phroi_forker" ] || fail "bootstrap.sh should clean its temporary bootstrap checkout on failure"
+
+BOOTSTRAP_SHIM_ARRAY_ROOT="$ROOT/bootstrap-shim-array"
+BOOTSTRAP_SHIM_ARRAY_FORKS="$BOOTSTRAP_SHIM_ARRAY_ROOT/forks"
+
+init_git_root "$BOOTSTRAP_SHIM_ARRAY_ROOT"
+mkdir -p "$BOOTSTRAP_SHIM_ARRAY_FORKS"
+printf '%s\n' '[]' > "$BOOTSTRAP_SHIM_ARRAY_FORKS/config.json"
+
+run_cmd env FORKER_BOOTSTRAP_UPSTREAM="file://$PHROI_FORKER_BARE" bash -c 'set -euo pipefail
+cd "$1"
+bash "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_ARRAY_ROOT" "$SOURCE_FORKER"
+assert_status 1 "bootstrap.sh should reject non-object config JSON"
+assert_contains "$CMD_OUTPUT" 'must be a JSON object' "bootstrap.sh should explain non-object config JSON"
+
+BOOTSTRAP_SHIM_CLONE_FAIL_ROOT="$ROOT/bootstrap-shim-clone-fail"
+BOOTSTRAP_SHIM_CLONE_FAIL_FORKS="$BOOTSTRAP_SHIM_CLONE_FAIL_ROOT/forks"
+
+init_git_root "$BOOTSTRAP_SHIM_CLONE_FAIL_ROOT"
+
+run_cmd env FORKER_BOOTSTRAP_UPSTREAM="file://$ROOT/does-not-exist.git" bash -c 'set -euo pipefail
+cd "$1"
+bash "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_CLONE_FAIL_ROOT" "$SOURCE_FORKER"
+assert_status 1 "bootstrap.sh should fail clearly when the bootstrap tool clone fails"
+assert_contains "$CMD_OUTPUT" 'could not clone phroi_forker from' "bootstrap.sh should report the failing phroi_forker upstream"
+assert_contains "$CMD_OUTPUT" 'fatal:' "bootstrap.sh should preserve git clone stderr on bootstrap clone failure"
+[ ! -d "$BOOTSTRAP_SHIM_CLONE_FAIL_FORKS/.stage/bootstrap-phroi_forker" ] || fail "bootstrap.sh should clean the bootstrap staging dir after clone failures"
+
+BOOTSTRAP_SHIM_CONFIG_TMP_ROOT="$ROOT/bootstrap-shim-config-tmp"
+BOOTSTRAP_SHIM_CONFIG_TMP_FORKS="$BOOTSTRAP_SHIM_CONFIG_TMP_ROOT/forks"
+
+init_git_root "$BOOTSTRAP_SHIM_CONFIG_TMP_ROOT"
+mkdir -p "$BOOTSTRAP_SHIM_CONFIG_TMP_FORKS"
+cat > "$BOOTSTRAP_SHIM_CONFIG_TMP_FORKS/config.json" <<JSON
+{
+  "reference": {
+    "upstream": "file://$BOOTSTRAP_SHIM_REF_BARE",
+    "mode": "reference"
+  }
+}
+JSON
+
+run_cmd bash -c 'set -euo pipefail
+source "$1/bootstrap.sh"
+trap cleanup_bootstrap_temp EXIT
+mv() {
+  return 1
+}
+ensure_config "$2/forks/config.json"' _ "$SOURCE_FORKER" "$BOOTSTRAP_SHIM_CONFIG_TMP_ROOT"
+assert_status 1 "bootstrap.sh should fail when config replacement cannot be published"
+if compgen -G "$BOOTSTRAP_SHIM_CONFIG_TMP_FORKS/config.json.tmp.*" >/dev/null; then
+  fail "bootstrap.sh should clean config temp files after config replacement failures"
+fi
 
 CUSTOM_LAYOUT_FORKS="$ROOT/custom-layout/phroi-worktrees"
 CUSTOM_LAYOUT_FORKER="$CUSTOM_LAYOUT_FORKS/phroi_forker/repo"

@@ -2,10 +2,10 @@
 set -euo pipefail
 
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
+source "$FORKER_DIR/workflow-lib.sh"
 
 main() {
-  bash "$FORKER_DIR/sync-all-references.sh"
-  bash "$FORKER_DIR/pins-to-missing-wips.sh"
+  bootstrap_workspace_workflow
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
