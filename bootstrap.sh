@@ -5,6 +5,7 @@ TOOL_NAME="phroi_forker"
 DEFAULT_FORKER_UPSTREAM="${FORKER_BOOTSTRAP_UPSTREAM:-https://github.com/phroi/forker.git}"
 BOOTSTRAP_TEMP_DIR=""
 BOOTSTRAP_TOOL_DIR=""
+BOOTSTRAP_CONFIG_TMP=""
 
 fail() {
   printf 'ERROR: %s\n' "$1" >&2
@@ -14,6 +15,10 @@ fail() {
 cleanup_bootstrap_temp() {
   if [ -n "$BOOTSTRAP_TEMP_DIR" ]; then
     rm -rf "$BOOTSTRAP_TEMP_DIR"
+  fi
+
+  if [ -n "$BOOTSTRAP_CONFIG_TMP" ]; then
+    rm -f "$BOOTSTRAP_CONFIG_TMP"
   fi
 }
 
@@ -80,9 +85,11 @@ ensure_config() {
   fi
 
   tmp=$(mktemp "$config_path.tmp.XXXXXX")
+  BOOTSTRAP_CONFIG_TMP="$tmp"
   jq --arg name "$TOOL_NAME" --arg upstream "$DEFAULT_FORKER_UPSTREAM" \
     '.[$name] = {"upstream": $upstream, "mode": "reference"}' "$config_path" > "$tmp"
   mv "$tmp" "$config_path"
+  BOOTSTRAP_CONFIG_TMP=""
 }
 
 tool_upstream() {
@@ -126,6 +133,7 @@ main() {
   cleanup_bootstrap_temp
   BOOTSTRAP_TEMP_DIR=""
   BOOTSTRAP_TOOL_DIR=""
+  BOOTSTRAP_CONFIG_TMP=""
 }
 
 if [ "${BASH_SOURCE[0]-$0}" = "$0" ]; then

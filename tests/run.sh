@@ -470,6 +470,32 @@ assert_contains "$CMD_OUTPUT" 'could not clone phroi_forker from' "bootstrap.sh 
 assert_contains "$CMD_OUTPUT" 'fatal:' "bootstrap.sh should preserve git clone stderr on bootstrap clone failure"
 [ ! -d "$BOOTSTRAP_SHIM_CLONE_FAIL_FORKS/.stage/bootstrap-phroi_forker" ] || fail "bootstrap.sh should clean the bootstrap staging dir after clone failures"
 
+BOOTSTRAP_SHIM_CONFIG_TMP_ROOT="$ROOT/bootstrap-shim-config-tmp"
+BOOTSTRAP_SHIM_CONFIG_TMP_FORKS="$BOOTSTRAP_SHIM_CONFIG_TMP_ROOT/forks"
+
+init_git_root "$BOOTSTRAP_SHIM_CONFIG_TMP_ROOT"
+mkdir -p "$BOOTSTRAP_SHIM_CONFIG_TMP_FORKS"
+cat > "$BOOTSTRAP_SHIM_CONFIG_TMP_FORKS/config.json" <<JSON
+{
+  "reference": {
+    "upstream": "file://$BOOTSTRAP_SHIM_REF_BARE",
+    "mode": "reference"
+  }
+}
+JSON
+
+run_cmd bash -c 'set -euo pipefail
+source "$1/bootstrap.sh"
+trap cleanup_bootstrap_temp EXIT
+mv() {
+  return 1
+}
+ensure_config "$2/forks/config.json"' _ "$SOURCE_FORKER" "$BOOTSTRAP_SHIM_CONFIG_TMP_ROOT"
+assert_status 1 "bootstrap.sh should fail when config replacement cannot be published"
+if compgen -G "$BOOTSTRAP_SHIM_CONFIG_TMP_FORKS/config.json.tmp.*" >/dev/null; then
+  fail "bootstrap.sh should clean config temp files after config replacement failures"
+fi
+
 CUSTOM_LAYOUT_FORKS="$ROOT/custom-layout/phroi-worktrees"
 CUSTOM_LAYOUT_FORKER="$CUSTOM_LAYOUT_FORKS/phroi_forker/repo"
 
