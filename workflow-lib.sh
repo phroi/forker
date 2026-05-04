@@ -1318,8 +1318,8 @@ verify_all_pins_workflow() {
   local name
 
   while IFS= read -r name; do
+    status=0
     line=$(verify_pins_workflow "$name" 2>&1) || status=$?
-    status=${status:-0}
     printf '%s\n' "$line"
 
     if [ "$status" -eq 0 ]; then
@@ -1327,8 +1327,6 @@ verify_all_pins_workflow() {
     else
       failed=$((failed + 1))
     fi
-
-    unset status
   done < <(managed_entries)
 
   printf 'summary\tverified=%d\tfailed=%d\n' "$verified" "$failed"
@@ -1382,6 +1380,7 @@ bootstrap_missing_managed_pins_workflow() {
   local name
 
   while IFS= read -r name; do
+    status=0
     pin_state=$(bootstrap_workspace_pin_state "$(live_pin_dir "$name")")
 
     case "$pin_state" in
@@ -1400,7 +1399,6 @@ bootstrap_missing_managed_pins_workflow() {
     esac
 
     line=$(upstream_to_pins_workflow "$name" 1 2>&1) || status=$?
-    status=${status:-0}
     printf '%s\n' "$line"
 
     if [ "$status" -eq 0 ]; then
@@ -1408,8 +1406,6 @@ bootstrap_missing_managed_pins_workflow() {
     else
       failed=$((failed + 1))
     fi
-
-    unset status
   done < <(managed_entries)
 
   printf 'summary\tderived=%d\tskipped=%d\tfailed=%d\n' "$derived" "$skipped" "$failed"
@@ -1453,6 +1449,7 @@ pins_to_missing_wips_workflow() {
   local name
 
   while IFS= read -r name; do
+    status=0
     if [ -d "$(live_repo_dir "$name")/.git" ]; then
       if managed_clone_is_replaceable "$name"; then
         printf '%s\tskipped\twip already present\n' "$name"
@@ -1465,7 +1462,6 @@ pins_to_missing_wips_workflow() {
     fi
 
     line=$(pins_to_wip_workflow "$name" 0 0 2>&1) || status=$?
-    status=${status:-0}
     printf '%s\n' "$line"
 
     if [ "$status" -eq 0 ]; then
@@ -1473,8 +1469,6 @@ pins_to_missing_wips_workflow() {
     else
       failed=$((failed + 1))
     fi
-
-    unset status
   done < <(managed_entries)
 
   printf 'summary\tmaterialized=%d\tskipped=%d\tfailed=%d\n' "$materialized" "$skipped" "$failed"
