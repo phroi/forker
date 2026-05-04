@@ -3,10 +3,17 @@ set -euo pipefail
 
 TOOL_NAME="phroi_forker"
 DEFAULT_FORKER_UPSTREAM="${FORKER_BOOTSTRAP_UPSTREAM:-https://github.com/phroi/forker.git}"
+BOOTSTRAP_TEMP_DIR=""
 
 fail() {
   printf 'ERROR: %s\n' "$1" >&2
   exit 1
+}
+
+cleanup_bootstrap_temp() {
+  if [ -n "$BOOTSTRAP_TEMP_DIR" ]; then
+    rm -rf "$BOOTSTRAP_TEMP_DIR"
+  fi
 }
 
 require_tool() {
@@ -20,9 +27,15 @@ repo_root() {
 ensure_forks_gitignore() {
   local path="$1/.gitignore"
   local line
+  local last_byte
 
   mkdir -p "$1"
   touch "$path"
+
+  last_byte=$(tail -c 1 "$path" 2>/dev/null | od -An -t x1 | tr -d ' \n')
+  if [ -n "$last_byte" ] && [ "$last_byte" != "0a" ]; then
+    printf '\n' >> "$path"
+  fi
 
   for line in '*/repo/' '.stage/' '.lock/'; do
     grep -Fqx "$line" "$path" || printf '%s\n' "$line" >> "$path"
@@ -41,7 +54,7 @@ EOF
 }
 
 validate_config() {
-  jq -e type "$1" >/dev/null 2>&1 || fail "$1 is not valid JSON"
+  jq -e 'type == "object"' "$1" >/dev/null 2>&1 || fail "$1 must be a JSON object"
 
   jq -e 'to_entries | all(.value | (.mode == "managed" or .mode == "reference"))' "$1" >/dev/null 2>&1 \
     || fail "all forks/config.json entries must declare mode=managed or mode=reference"
@@ -96,6 +109,7 @@ main() {
 
   require_tool git
   require_tool jq
+  trap cleanup_bootstrap_temp EXIT
 
   root_dir=$(repo_root)
   forks_dir="$root_dir/forks"
@@ -106,9 +120,11 @@ main() {
 
   tool_dir=$(fetch_bootstrap_tool "$forks_dir" "$config_path")
   temp_tool_dir="$(dirname "$tool_dir")"
+  BOOTSTRAP_TEMP_DIR="$temp_tool_dir"
 
   bash "$tool_dir/materialize-workspace.sh"
-  rm -rf "$temp_tool_dir"
+  cleanup_bootstrap_temp
+  BOOTSTRAP_TEMP_DIR=""
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then

@@ -375,6 +375,20 @@ assert_equals "$(jq -r '.phroi_forker.upstream' "$BOOTSTRAP_SHIM_EMPTY_FORKS/con
 [ ! -d "$BOOTSTRAP_SHIM_EMPTY_FORKS/.stage/bootstrap-phroi_forker" ] || fail "bootstrap.sh should clean its temporary bootstrap checkout on success"
 assert_contains "$(cat "$BOOTSTRAP_SHIM_EMPTY_FORKS/.gitignore")" '*/repo/' "bootstrap.sh should ensure forks/.gitignore ignores live clones"
 
+BOOTSTRAP_SHIM_GITIGNORE_ROOT="$ROOT/bootstrap-shim-gitignore"
+BOOTSTRAP_SHIM_GITIGNORE_FORKS="$BOOTSTRAP_SHIM_GITIGNORE_ROOT/forks"
+
+init_git_root "$BOOTSTRAP_SHIM_GITIGNORE_ROOT"
+mkdir -p "$BOOTSTRAP_SHIM_GITIGNORE_FORKS"
+printf '%s' 'custom-rule' > "$BOOTSTRAP_SHIM_GITIGNORE_FORKS/.gitignore"
+
+run_cmd env FORKER_BOOTSTRAP_UPSTREAM="file://$PHROI_FORKER_BARE" bash -c 'set -euo pipefail
+cd "$1"
+bash "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_GITIGNORE_ROOT" "$SOURCE_FORKER"
+assert_status 0 "bootstrap.sh should preserve existing gitignore lines without a trailing newline"
+grep -Fqx 'custom-rule' "$BOOTSTRAP_SHIM_GITIGNORE_FORKS/.gitignore" || fail "bootstrap.sh should preserve the last pre-existing gitignore rule"
+grep -Fqx '*/repo/' "$BOOTSTRAP_SHIM_GITIGNORE_FORKS/.gitignore" || fail "bootstrap.sh should add the repo ignore rule after a missing trailing newline"
+
 BOOTSTRAP_SHIM_EXISTING_ROOT="$ROOT/bootstrap-shim-existing"
 BOOTSTRAP_SHIM_EXISTING_FORKS="$BOOTSTRAP_SHIM_EXISTING_ROOT/forks"
 IFS=$'\t' read -r _ BOOTSTRAP_SHIM_REF_BARE <<< "$(create_upstream bootstrap-shim-reference main)"
@@ -428,6 +442,20 @@ cd "$1"
 bash "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_INVALID_ROOT" "$SOURCE_FORKER"
 assert_status 1 "bootstrap.sh should reject configs without explicit modes"
 assert_contains "$CMD_OUTPUT" 'all forks/config.json entries must declare mode=managed or mode=reference' "bootstrap.sh should explain invalid mode configuration"
+[ ! -d "$BOOTSTRAP_SHIM_INVALID_FORKS/.stage/bootstrap-phroi_forker" ] || fail "bootstrap.sh should clean its temporary bootstrap checkout on failure"
+
+BOOTSTRAP_SHIM_ARRAY_ROOT="$ROOT/bootstrap-shim-array"
+BOOTSTRAP_SHIM_ARRAY_FORKS="$BOOTSTRAP_SHIM_ARRAY_ROOT/forks"
+
+init_git_root "$BOOTSTRAP_SHIM_ARRAY_ROOT"
+mkdir -p "$BOOTSTRAP_SHIM_ARRAY_FORKS"
+printf '%s\n' '[]' > "$BOOTSTRAP_SHIM_ARRAY_FORKS/config.json"
+
+run_cmd env FORKER_BOOTSTRAP_UPSTREAM="file://$PHROI_FORKER_BARE" bash -c 'set -euo pipefail
+cd "$1"
+bash "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_ARRAY_ROOT" "$SOURCE_FORKER"
+assert_status 1 "bootstrap.sh should reject non-object config JSON"
+assert_contains "$CMD_OUTPUT" 'must be a JSON object' "bootstrap.sh should explain non-object config JSON"
 
 CUSTOM_LAYOUT_FORKS="$ROOT/custom-layout/phroi-worktrees"
 CUSTOM_LAYOUT_FORKER="$CUSTOM_LAYOUT_FORKS/phroi_forker/repo"

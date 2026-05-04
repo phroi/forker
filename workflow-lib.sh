@@ -1336,8 +1336,8 @@ verify_all_pins_workflow() {
 }
 
 bootstrap_workspace_validate_config() {
-  if ! jq -e type "$FORKS_DIR/config.json" >/dev/null 2>&1; then
-    echo "ERROR: $FORKS_DIR/config.json is not valid JSON." >&2
+  if ! jq -e 'type == "object"' "$FORKS_DIR/config.json" >/dev/null 2>&1; then
+    echo "ERROR: $FORKS_DIR/config.json must be a JSON object." >&2
     return 1
   fi
 
