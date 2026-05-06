@@ -230,15 +230,17 @@ publish_dir_swap() {
     fi
 
     if ! mv -T "$staged" "$live"; then
-      mv -T "$backup_live" "$live" >/dev/null 2>&1 || {
+      mv -T "$backup_live" "$live" || {
         echo "ERROR: could not publish $live or restore the previous entry." >&2
         return 1
       }
       return 1
     fi
 
-    chmod -R u+w "$backup_live" 2>/dev/null || true
+    register_exit_cleanup_dir "$backup_live"
+    chmod -R u+w "$backup_live" || true
     rm -rf "$backup_live"
+    unregister_exit_cleanup_dir "$backup_live"
   else
     mv -T "$staged" "$live"
   fi
