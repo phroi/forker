@@ -209,7 +209,8 @@ publish_dir_swap() {
   local live="$2"
   local live_parent backup_live
 
-  # Swap staged and live in one step so readers see old or new, not half-published state.
+  # Prefer an atomic exchange when supported. Older coreutils fall back to a
+  # two-step replace with rollback, which can briefly leave the live path absent.
   live_parent=$(dirname "$live")
   mkdir -p "$live_parent"
 
