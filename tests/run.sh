@@ -23,7 +23,7 @@ git_commit_with_next_timestamp() {
 mkdir -p "$FORKER_ROOT"
 SOURCE_FORKER="$(cd "$(dirname "$0")/.." && pwd)"
 cp -a "$SOURCE_FORKER"/. "$FORKER_ROOT/"
-chmod -R u+w "$FORKER_ROOT" 2>/dev/null || true
+chmod -R u+w "$FORKER_ROOT" || true
 rm -rf "$FORKER_ROOT/.git"
 
 CMD_OUTPUT=""
@@ -245,7 +245,7 @@ BOOTSTRAP_WORKSPACE_FORKER="$BOOTSTRAP_WORKSPACE_FORKS/phroi_forker/repo"
 
 mkdir -p "$BOOTSTRAP_WORKSPACE_FORKER"
 cp -a "$SOURCE_FORKER"/. "$BOOTSTRAP_WORKSPACE_FORKER/"
-chmod -R u+w "$BOOTSTRAP_WORKSPACE_FORKER" 2>/dev/null || true
+chmod -R u+w "$BOOTSTRAP_WORKSPACE_FORKER" || true
 rm -rf "$BOOTSTRAP_WORKSPACE_FORKER/.git"
 
 IFS=$'\t' read -r _ PHROI_FORKER_BARE <<< "$(create_repo_from_dir "$SOURCE_FORKER" bootstrap-workspace-forker master)"
@@ -288,7 +288,7 @@ BOOTSTRAP_REFERENCE_FORKER="$BOOTSTRAP_REFERENCE_FORKS/phroi_forker/repo"
 
 mkdir -p "$BOOTSTRAP_REFERENCE_FORKER"
 cp -a "$SOURCE_FORKER"/. "$BOOTSTRAP_REFERENCE_FORKER/"
-chmod -R u+w "$BOOTSTRAP_REFERENCE_FORKER" 2>/dev/null || true
+chmod -R u+w "$BOOTSTRAP_REFERENCE_FORKER" || true
 rm -rf "$BOOTSTRAP_REFERENCE_FORKER/.git"
 
 IFS=$'\t' read -r _ PHROI_FORKER_REF_BARE <<< "$(create_repo_from_dir "$SOURCE_FORKER" bootstrap-workspace-reference-forker master)"
@@ -341,7 +341,7 @@ BOOTSTRAP_SCRATCH_FORKER="$BOOTSTRAP_SCRATCH_ROOT/.scratch/forker/repo"
 
 mkdir -p "$BOOTSTRAP_SCRATCH_FORKER"
 cp -a "$SOURCE_FORKER"/. "$BOOTSTRAP_SCRATCH_FORKER/"
-chmod -R u+w "$BOOTSTRAP_SCRATCH_FORKER" 2>/dev/null || true
+chmod -R u+w "$BOOTSTRAP_SCRATCH_FORKER" || true
 rm -rf "$BOOTSTRAP_SCRATCH_FORKER/.git"
 
 IFS=$'\t' read -r _ BOOTSTRAP_SCRATCH_REF_BARE <<< "$(create_upstream bootstrap-workspace-scratch-reference main)"
@@ -515,7 +515,7 @@ CUSTOM_LAYOUT_FORKER="$CUSTOM_LAYOUT_FORKS/phroi_forker/repo"
 
 mkdir -p "$CUSTOM_LAYOUT_FORKER"
 cp -a "$SOURCE_FORKER"/. "$CUSTOM_LAYOUT_FORKER/"
-chmod -R u+w "$CUSTOM_LAYOUT_FORKER" 2>/dev/null || true
+chmod -R u+w "$CUSTOM_LAYOUT_FORKER" || true
 rm -rf "$CUSTOM_LAYOUT_FORKER/.git"
 printf '{}\n' > "$CUSTOM_LAYOUT_FORKS/config.json"
 
