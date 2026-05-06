@@ -91,6 +91,10 @@ stage_root_dir() {
   echo "$FORKS_DIR/.stage"
 }
 
+swap_root_dir() {
+  echo "$FORKS_DIR/.swap"
+}
+
 stage_entry_dir() {
   echo "$(stage_root_dir)/$1"
 }
@@ -203,18 +207,41 @@ cleanup_stage_entry() {
 publish_dir_swap() {
   local staged="$1"
   local live="$2"
-  local live_parent
+  local live_parent backup_live
 
-  # Swap staged and live in one step so readers see old or new, not half-published state.
+  # Prefer an atomic exchange when supported. Older coreutils fall back to a
+  # two-step replace with rollback, which can briefly leave the live path absent.
   live_parent=$(dirname "$live")
   mkdir -p "$live_parent"
 
   if [ -e "$live" ]; then
-    if ! supports_mv_exchange; then
-      echo "ERROR: mv --exchange is required to swap existing directories safely." >&2
+    if supports_mv_exchange; then
+      mv -T --exchange "$staged" "$live"
+      return 0
+    fi
+
+    # Older coreutils lack `mv --exchange`. Fall back to a two-step publish
+    # with rollback so existing entries still convert on Ubuntu 22.
+    mkdir -p "$(swap_root_dir)" || return 1
+    backup_live=$(mktemp -d "$(swap_root_dir)/publish.XXXXXX") || return 1
+    rmdir "$backup_live" || return 1
+
+    if ! mv -T "$live" "$backup_live"; then
       return 1
     fi
-    mv -T --exchange "$staged" "$live"
+
+    if ! mv -T "$staged" "$live"; then
+      mv -T "$backup_live" "$live" || {
+        echo "ERROR: could not publish $live or restore the previous entry." >&2
+        return 1
+      }
+      return 1
+    fi
+
+    register_exit_cleanup_dir "$backup_live"
+    chmod -R u+w "$backup_live" || true
+    rm -rf "$backup_live"
+    unregister_exit_cleanup_dir "$backup_live"
   else
     mv -T "$staged" "$live"
   fi

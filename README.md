@@ -16,7 +16,7 @@ forks/<name>/
 ```
 
 `repo/` is the live git clone. `pin/` is tracked fork state.
-Only `forks/<name>/{repo,pin}` is live state. `forks/.stage/` is disposable scratch.
+Only `forks/<name>/{repo,pin}` is live state. `forks/.stage/` and `forks/.swap/` are disposable scratch.
 
 ## Use This When
 
