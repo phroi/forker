@@ -1807,7 +1807,7 @@ health_workflow() {
   if supports_mv_exchange; then
     health_ok tool mv-exchange available
   else
-    health_error tool mv-exchange missing
+    health_ok tool mv-exchange fallback-publish-path
   fi
 
   if jq -e type "$FORKS_DIR/config.json" >/dev/null 2>&1; then

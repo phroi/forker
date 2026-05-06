@@ -43,7 +43,7 @@ ensure_forks_gitignore() {
     printf '\n' >> "$path"
   fi
 
-  for line in '*/repo/' '.stage/' '.lock/'; do
+  for line in '*/repo/' '.stage/' '.swap/' '.lock/'; do
     grep -Fqx "$line" "$path" || printf '%s\n' "$line" >> "$path"
   done
 }

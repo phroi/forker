@@ -23,6 +23,7 @@ git_commit_with_next_timestamp() {
 mkdir -p "$FORKER_ROOT"
 SOURCE_FORKER="$(cd "$(dirname "$0")/.." && pwd)"
 cp -a "$SOURCE_FORKER"/. "$FORKER_ROOT/"
+chmod -R u+w "$FORKER_ROOT" 2>/dev/null || true
 rm -rf "$FORKER_ROOT/.git"
 
 CMD_OUTPUT=""
@@ -244,6 +245,7 @@ BOOTSTRAP_WORKSPACE_FORKER="$BOOTSTRAP_WORKSPACE_FORKS/phroi_forker/repo"
 
 mkdir -p "$BOOTSTRAP_WORKSPACE_FORKER"
 cp -a "$SOURCE_FORKER"/. "$BOOTSTRAP_WORKSPACE_FORKER/"
+chmod -R u+w "$BOOTSTRAP_WORKSPACE_FORKER" 2>/dev/null || true
 rm -rf "$BOOTSTRAP_WORKSPACE_FORKER/.git"
 
 IFS=$'\t' read -r _ PHROI_FORKER_BARE <<< "$(create_repo_from_dir "$SOURCE_FORKER" bootstrap-workspace-forker master)"
@@ -286,6 +288,7 @@ BOOTSTRAP_REFERENCE_FORKER="$BOOTSTRAP_REFERENCE_FORKS/phroi_forker/repo"
 
 mkdir -p "$BOOTSTRAP_REFERENCE_FORKER"
 cp -a "$SOURCE_FORKER"/. "$BOOTSTRAP_REFERENCE_FORKER/"
+chmod -R u+w "$BOOTSTRAP_REFERENCE_FORKER" 2>/dev/null || true
 rm -rf "$BOOTSTRAP_REFERENCE_FORKER/.git"
 
 IFS=$'\t' read -r _ PHROI_FORKER_REF_BARE <<< "$(create_repo_from_dir "$SOURCE_FORKER" bootstrap-workspace-reference-forker master)"
@@ -322,12 +325,23 @@ assert_contains "$CMD_OUTPUT" $'summary\tmaterialized=0\tskipped=1\tfailed=0' "m
 [ -d "$BOOTSTRAP_REFERENCE_FORKS/reference/repo/.git" ] || fail "materialize-workspace.sh should still clone other reference entries in reference mode"
 [ -d "$BOOTSTRAP_REFERENCE_FORKS/managed/repo/.git" ] || fail "materialize-workspace.sh should still materialize managed entries in reference mode"
 
+run_cmd bash "$BOOTSTRAP_REFERENCE_FORKER/reference-to-managed.sh" phroi_forker
+assert_status 0 "reference-to-managed.sh should convert phroi_forker itself on hosts without mv --exchange"
+assert_contains "$CMD_OUTPUT" 'phroi_forker: converted to managed with base_branch=master' "reference-to-managed.sh should preserve the tool repo primary branch during self-conversion"
+assert_equals "$(jq -r '.phroi_forker.mode' "$BOOTSTRAP_REFERENCE_FORKS/config.json")" 'managed' "reference-to-managed.sh should rewrite phroi_forker to managed mode"
+assert_equals "$(jq -r '.phroi_forker.base_branch' "$BOOTSTRAP_REFERENCE_FORKS/config.json")" 'master' "reference-to-managed.sh should record phroi_forker base_branch during self-conversion"
+assert_equals "$(jq -c '.phroi_forker.refs' "$BOOTSTRAP_REFERENCE_FORKS/config.json")" '[]' "reference-to-managed.sh should keep phroi_forker refs explicit after self-conversion"
+[ -d "$BOOTSTRAP_REFERENCE_FORKS/phroi_forker/pin" ] || fail "reference-to-managed.sh should create pin state when phroi_forker converts itself"
+assert_equals "$(git -C "$BOOTSTRAP_REFERENCE_FORKS/phroi_forker/repo" branch --show-current)" 'wip' "reference-to-managed.sh should leave phroi_forker on wip after self-conversion"
+[ -w "$BOOTSTRAP_REFERENCE_FORKS/phroi_forker/repo/README.md" ] || fail "reference-to-managed.sh should leave self-converted phroi_forker writable"
+
 BOOTSTRAP_SCRATCH_ROOT="$ROOT/bootstrap-workspace-scratch"
 BOOTSTRAP_SCRATCH_FORKS="$BOOTSTRAP_SCRATCH_ROOT/forks"
 BOOTSTRAP_SCRATCH_FORKER="$BOOTSTRAP_SCRATCH_ROOT/.scratch/forker/repo"
 
 mkdir -p "$BOOTSTRAP_SCRATCH_FORKER"
 cp -a "$SOURCE_FORKER"/. "$BOOTSTRAP_SCRATCH_FORKER/"
+chmod -R u+w "$BOOTSTRAP_SCRATCH_FORKER" 2>/dev/null || true
 rm -rf "$BOOTSTRAP_SCRATCH_FORKER/.git"
 
 IFS=$'\t' read -r _ BOOTSTRAP_SCRATCH_REF_BARE <<< "$(create_upstream bootstrap-workspace-scratch-reference main)"
@@ -501,6 +515,7 @@ CUSTOM_LAYOUT_FORKER="$CUSTOM_LAYOUT_FORKS/phroi_forker/repo"
 
 mkdir -p "$CUSTOM_LAYOUT_FORKER"
 cp -a "$SOURCE_FORKER"/. "$CUSTOM_LAYOUT_FORKER/"
+chmod -R u+w "$CUSTOM_LAYOUT_FORKER" 2>/dev/null || true
 rm -rf "$CUSTOM_LAYOUT_FORKER/.git"
 printf '{}\n' > "$CUSTOM_LAYOUT_FORKS/config.json"
 
