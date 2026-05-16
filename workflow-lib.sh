@@ -598,7 +598,9 @@ build_upstream_to_pins_staging() {
   rm -rf "$output_repo" "$output_pin"
   mkdir -p "$output_pin"
 
-  git clone --filter=blob:none "$upstream" "$output_repo"
+  # Managed replays need historical blobs during merges and conflict reconstruction;
+  # GitHub partial-clone promisors can reject those lazy fetches.
+  git clone "$upstream" "$output_repo"
 
   git -C "$output_repo" config merge.conflictStyle diff3
   git -C "$output_repo" config core.abbrev 40
@@ -735,7 +737,9 @@ build_pins_to_wip_staging() {
   rm -rf "$output_repo"
 
   base_sha=$(head -1 "$manifest" | cut -d$'\t' -f1)
-  git clone --filter=blob:none "$upstream" "$output_repo"
+  # Managed replays need historical blobs during merges and conflict reconstruction;
+  # GitHub partial-clone promisors can reject those lazy fetches.
+  git clone "$upstream" "$output_repo"
 
   git -C "$output_repo" config merge.conflictStyle diff3
   git -C "$output_repo" config core.abbrev 40
