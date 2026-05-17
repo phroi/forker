@@ -336,7 +336,7 @@ N THEIRS     - keep theirs (ours is outdated or superseded)
 N BOTH_OT    - concatenate ours then theirs
 N BOTH_TO    - concatenate theirs then ours
 N GENERATE   - needs custom merge
-No explanations.")
+No explanations.") || return 1
 
   while IFS=' ' read -r num strategy rest; do
     [[ "${num:-}" =~ ^[0-9]+$ ]] || continue
@@ -395,7 +395,7 @@ No explanations.")
       close(f)
     }
   }
-  '
+  ' || return 1
 }
 
 load_managed_clone_context() {
@@ -567,7 +567,7 @@ resolve_conflict() {
   [ ${#need_ask[@]} -eq 0 ] && { finish_conflict_resolution "$file" "$work" "$count" sha; return; }
   reuse_saved_conflict_resolutions "$work" sha need_ask
   [ ${#need_ask[@]} -eq 0 ] && { finish_conflict_resolution "$file" "$work" "$count" sha; return; }
-  classify_and_generate_conflicts "$work" need_ask
+  classify_and_generate_conflicts "$work" need_ask || return 1
   finish_conflict_resolution "$file" "$work" "$count" sha
 }
 

@@ -273,7 +273,7 @@ upstream_url() {
 }
 
 forker_ask() {
-  if [ -z "${FORKER_ASK:-}" ]; then
+  if [ -z "${FORKER_ASK:-}" ] || ! command -v "$FORKER_ASK" >/dev/null; then
     echo "ERROR: set FORKER_ASK to an executable that resolves conflicts." >&2
     return 127
   fi
