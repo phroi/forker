@@ -60,10 +60,8 @@ assert_config_missing() {
   local message="$3"
   local output status
 
-  set +e
-  output=$(git -C "$repo" config --get "$key" 2>&1)
-  status=$?
-  set -e
+  status=0
+  output=$(git -C "$repo" config --get "$key" 2>&1) || status=$?
 
   [ "$status" -eq 1 ] || fail "$message (expected missing config key, git config status $status: $output)"
 }
