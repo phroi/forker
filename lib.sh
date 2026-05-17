@@ -34,7 +34,6 @@ case "$FORKER_DIR" in
   "$FORKS_DIR"/*/repo) TOOL_REL="$(basename "$FORKS_DIR")/$(basename "$ENTRY_DIR")/repo" ;;
   *) TOOL_REL="$FORKER_DIR" ;;
 esac
-PACKAGE_ROOT="${FORKER_PACKAGE_ROOT:-$ROOT_DIR}"
 
 config_val() {
   # Read one config entry and evaluate a jq expression against it.
@@ -273,8 +272,13 @@ upstream_url() {
   config_val "$1" '.upstream'
 }
 
-coworker_ask() {
-  pnpm --dir "$PACKAGE_ROOT" --silent coworker:ask "$@"
+forker_ask() {
+  if [ -z "${FORKER_ASK:-}" ] || ! command -v "$FORKER_ASK" >/dev/null; then
+    echo "ERROR: set FORKER_ASK to an executable that resolves conflicts." >&2
+    return 127
+  fi
+
+  "$FORKER_ASK" "$@"
 }
 
 fork_url() {

@@ -584,17 +584,63 @@ printf "%s\n" "$TOOL_REL"' _ "$CUSTOM_LAYOUT_FORKER"
 assert_status 0 "lib.sh should resolve TOOL_REL from a custom forks directory name"
 assert_equals "$CMD_OUTPUT" 'phroi-worktrees/phroi_forker/repo' "lib.sh should use the discovered forks directory basename in TOOL_REL"
 
+ASK_PROVIDER="$ROOT/forker-ask"
+cat > "$ASK_PROVIDER" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+cat >/dev/null
+if [[ "$1" == For\ each\ conflict* ]]; then
+  printf "%s\n" "1 GENERATE"
+else
+  case "${FORKER_TEST_ASK_MODE:-}" in
+    trailing-blank-lines)
+      printf "=== RESOLUTION 1 ===\nmerged line\n\n"
+      ;;
+    no-final-newline)
+      printf "=== RESOLUTION 1 ===\nmerged line"
+      ;;
+    *)
+      printf 'unknown FORKER_TEST_ASK_MODE\n' >&2
+      exit 1
+      ;;
+  esac
+fi
+SH
+chmod +x "$ASK_PROVIDER"
+
 run_cmd bash -c 'set -euo pipefail
 source "$1/lib.sh"
+forker_ask prompt' _ "$FORKER_ROOT"
+assert_status 127 "forker_ask should require FORKER_ASK"
+assert_contains "$CMD_OUTPUT" 'set FORKER_ASK' "forker_ask should explain the required command"
+
+run_cmd env FORKER_ASK="$ROOT/missing-ask" bash -c 'set -euo pipefail
+source "$1/lib.sh"
+forker_ask prompt' _ "$FORKER_ROOT"
+assert_status 127 "forker_ask should reject a missing FORKER_ASK command"
+assert_contains "$CMD_OUTPUT" 'set FORKER_ASK' "forker_ask should explain a missing command"
+
+run_cmd env FORKER_ASK="$ASK_PROVIDER" FORKER_TEST_ASK_MODE=fail bash -c 'set -euo pipefail
+source "$1/lib.sh"
 source "$1/workflow-lib.sh"
-coworker_ask() {
-  cat >/dev/null
-  if [[ "$1" == For\ each\ conflict* ]]; then
-    printf "%s\n" "1 GENERATE"
-  else
-    printf "=== RESOLUTION 1 ===\nmerged line\n\n"
-  fi
-}
+file=$(mktemp)
+{
+  printf "%s\n" "<<<<<<< ours"
+  printf "%s\n" "ours line"
+  printf "%s\n" "||||||| base"
+  printf "%s\n" "base line"
+  printf "%s\n" "======="
+  printf "%s\n" "theirs line"
+  printf "%s\n" ">>>>>>> theirs"
+} > "$file"
+resolve_conflict "$file" sample.txt > "$file.resolved"' bash "$FORKER_ROOT"
+assert_status 1 "resolve_conflict should propagate FORKER_ASK failures"
+assert_contains "$CMD_OUTPUT" 'unknown FORKER_TEST_ASK_MODE' "resolve_conflict should preserve provider failure output"
+
+run_cmd env FORKER_ASK="$ASK_PROVIDER" FORKER_TEST_ASK_MODE=trailing-blank-lines bash -c 'set -euo pipefail
+source "$1/lib.sh"
+source "$1/workflow-lib.sh"
 file=$(mktemp)
 actual=$(mktemp)
 expected=$(mktemp)
@@ -613,17 +659,9 @@ cmp -s "$actual" "$expected"
 grep -q "resolution=2" "$file.resolution"' bash "$FORKER_ROOT"
 assert_status 0 "resolve_conflict should preserve generated trailing blank lines in recorded resolutions"
 
-run_cmd bash -c 'set -euo pipefail
+run_cmd env FORKER_ASK="$ASK_PROVIDER" FORKER_TEST_ASK_MODE=no-final-newline bash -c 'set -euo pipefail
 source "$1/lib.sh"
 source "$1/workflow-lib.sh"
-coworker_ask() {
-  cat >/dev/null
-  if [[ "$1" == For\ each\ conflict* ]]; then
-    printf "%s\n" "1 GENERATE"
-  else
-    printf "=== RESOLUTION 1 ===\nmerged line"
-  fi
-}
 file=$(mktemp)
 cat > "$file" <<'"'"'EOF'"'"'
 <<<<<<< ours
@@ -1063,8 +1101,17 @@ ln -s "$(command -v jq)" "$FAKEBIN/jq"
 ln -s "$(command -v dirname)" "$FAKEBIN/dirname"
 
 run_cmd env PATH="$FAKEBIN" /bin/bash "$FORKER_ROOT/health.sh"
-assert_status 0 "health.sh should treat pnpm as optional"
-assert_contains "$CMD_OUTPUT" $'OK\ttool\tpnpm\toptional-for-conflicts-only' "health.sh should report missing pnpm as optional"
+assert_status 0 "health.sh should not require pnpm"
+[[ "$CMD_OUTPUT" != *pnpm* ]] || fail "health.sh should not mention pnpm"
+assert_contains "$CMD_OUTPUT" $'OK\ttool\tFORKER_ASK\toptional-for-conflicts-only' "health.sh should report missing FORKER_ASK as optional"
+
+run_cmd env FORKER_ASK="$ASK_PROVIDER" bash "$FORKER_ROOT/health.sh"
+assert_status 0 "health.sh should accept a configured FORKER_ASK"
+assert_contains "$CMD_OUTPUT" $'OK\ttool\tFORKER_ASK\tavailable' "health.sh should report configured FORKER_ASK"
+
+run_cmd env FORKER_ASK="$ROOT/missing-ask" bash "$FORKER_ROOT/health.sh"
+assert_status 1 "health.sh should reject a configured missing FORKER_ASK"
+assert_contains "$CMD_OUTPUT" $'ERROR\ttool\tFORKER_ASK\tmissing' "health.sh should report missing configured FORKER_ASK"
 
 run_cmd bash "$FORKER_ROOT/health.sh"
 assert_status 0 "health.sh should still succeed after workflow operations"
