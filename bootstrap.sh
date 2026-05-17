@@ -65,6 +65,9 @@ validate_config() {
   jq -e 'to_entries | all(.value | (.mode == "managed" or .mode == "reference"))' "$1" >/dev/null 2>&1 \
     || fail "all forks/config.json entries must declare mode=managed or mode=reference"
 
+  jq -e 'to_entries | all(.value | .mode != "reference" or (has("reference_branch") | not) or .reference_branch == "default" or .reference_branch == "newest")' "$1" >/dev/null 2>&1 \
+    || fail "reference entries must set reference_branch to 'default' or 'newest' when present"
+
   jq -e 'has("forker") | not' "$1" >/dev/null 2>&1 \
     || fail "legacy 'forker' config entries are not supported; migrate to 'phroi_forker' first"
 }

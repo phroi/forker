@@ -36,7 +36,7 @@ require_configured_entry() {
 }
 
 build_reference_repo_unlocked() {
-  local repo_dir="$1" upstream="$2" remote_head_branch="$3"
+  local name="$1" repo_dir="$2" upstream="$3" remote_head_branch="$4"
 
   rm -rf "$repo_dir"
   git init --quiet "$repo_dir" || return 1
@@ -48,7 +48,7 @@ build_reference_repo_unlocked() {
     set_local_origin_head "$repo_dir" "$remote_head_branch" || return 1
   fi
 
-  _FORKER_REFERENCE_PRIMARY_BRANCH=$(reference_primary_branch "$repo_dir" "$remote_head_branch") || return 1
+  _FORKER_REFERENCE_PRIMARY_BRANCH=$(reference_primary_branch "$name" "$repo_dir" "$remote_head_branch") || return 1
   git -C "$repo_dir" checkout --quiet -B "$_FORKER_REFERENCE_PRIMARY_BRANCH" "origin/$_FORKER_REFERENCE_PRIMARY_BRANCH" || return 1
   git -C "$repo_dir" branch --set-upstream-to="origin/$_FORKER_REFERENCE_PRIMARY_BRANCH" "$_FORKER_REFERENCE_PRIMARY_BRANCH" >/dev/null 2>&1 || true
 
@@ -62,14 +62,14 @@ rebuild_reference_clone_unlocked() {
 
   reset_stage_entry "$name"
   work_repo=$(stage_repo_dir "$name")
-  build_reference_repo_unlocked "$work_repo" "$upstream" "$remote_head_branch" || return 1
+  build_reference_repo_unlocked "$name" "$work_repo" "$upstream" "$remote_head_branch" || return 1
   publish_dir_swap "$work_repo" "$(live_repo_dir "$name")" || return 1
   reference_repo_make_readonly "$(live_repo_dir "$name")" || return 1
   cleanup_stage_entry "$name"
 }
 
 sync_reference_repo_unlocked() {
-  local repo_dir="$1" upstream="$2" remote_head_branch="$3"
+  local name="$1" repo_dir="$2" upstream="$3" remote_head_branch="$4"
 
   git -C "$repo_dir" remote set-url origin "$upstream" >/dev/null 2>&1 || return 1
   git -C "$repo_dir" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" || return 1
@@ -81,7 +81,7 @@ sync_reference_repo_unlocked() {
     set_local_origin_head "$repo_dir" "$remote_head_branch" || return 1
   fi
 
-  _FORKER_REFERENCE_PRIMARY_BRANCH=$(reference_primary_branch "$repo_dir" "$remote_head_branch") || return 1
+  _FORKER_REFERENCE_PRIMARY_BRANCH=$(reference_primary_branch "$name" "$repo_dir" "$remote_head_branch") || return 1
   git -C "$repo_dir" checkout --quiet -B "$_FORKER_REFERENCE_PRIMARY_BRANCH" "origin/$_FORKER_REFERENCE_PRIMARY_BRANCH" || return 1
   git -C "$repo_dir" reset --hard --quiet "origin/$_FORKER_REFERENCE_PRIMARY_BRANCH" || return 1
   git -C "$repo_dir" clean -fdx >/dev/null 2>&1 || return 1
@@ -186,11 +186,11 @@ load_entry_state() {
   fi
 
   _FORKER_ENTRY_REMOTE_HEAD_REF=$(local_origin_head_ref "$_FORKER_ENTRY_REPO" 2>/dev/null || true)
-  _FORKER_ENTRY_BASELINE_REF=$(reference_primary_ref "$_FORKER_ENTRY_REPO" 2>/dev/null) || {
+  _FORKER_ENTRY_BASELINE_REF=$(reference_primary_ref "$name" "$_FORKER_ENTRY_REPO" 2>/dev/null) || {
     _FORKER_ENTRY_STATUS="no-remote-baseline"
     return 0
   }
-  _FORKER_ENTRY_BASELINE_SHA=$(reference_primary_sha "$_FORKER_ENTRY_REPO")
+  _FORKER_ENTRY_BASELINE_SHA=$(reference_primary_sha "$name" "$_FORKER_ENTRY_REPO")
   _FORKER_ENTRY_ACTUAL_HEAD=$(repo_head "$_FORKER_ENTRY_REPO")
 
   if reference_repo_is_readonly "$_FORKER_ENTRY_REPO"; then
@@ -978,7 +978,7 @@ sync_reference_workflow() {
   fi
 
   old_sha=$(repo_head "$real_repo")
-  old_primary=$(reference_primary_branch "$real_repo" "$(reference_remote_head_branch "$real_repo" 2>/dev/null || true)" 2>/dev/null || true)
+  old_primary=$(reference_primary_branch "$name" "$real_repo" "$(reference_remote_head_branch "$real_repo" 2>/dev/null || true)" 2>/dev/null || true)
   if reference_repo_is_readonly "$real_repo"; then
     old_readonly=yes
   else
@@ -992,7 +992,7 @@ sync_reference_workflow() {
     return 1
   }
 
-  if ! sync_reference_repo_unlocked "$real_repo" "$upstream" "$remote_head_branch"; then
+  if ! sync_reference_repo_unlocked "$name" "$real_repo" "$upstream" "$remote_head_branch"; then
     reference_repo_make_readonly "$real_repo" >/dev/null 2>&1 || true
     current_sha=$(repo_head "$real_repo" 2>/dev/null || printf -- '-')
     release_entry_lock "$name"
@@ -1143,14 +1143,14 @@ reference_to_managed_workflow() {
   fi
 
   if [ -d "$real_repo/.git" ]; then
-    primary_branch=$(reference_primary_branch "$real_repo" "$(reference_remote_head_branch "$real_repo" 2>/dev/null || true)" 2>/dev/null || true)
+    primary_branch=$(reference_primary_branch "$name" "$real_repo" "$(reference_remote_head_branch "$real_repo" 2>/dev/null || true)" 2>/dev/null || true)
   fi
 
   if [ -z "$primary_branch" ]; then
     remote_head_branch=$(remote_default_branch "$upstream" 2>/dev/null || true)
     reset_stage_entry "$name"
     work_repo=$(stage_repo_dir "$name")
-    if ! build_reference_repo_unlocked "$work_repo" "$upstream" "$remote_head_branch"; then
+    if ! build_reference_repo_unlocked "$name" "$work_repo" "$upstream" "$remote_head_branch"; then
       cleanup_stage_entry "$name"
       release_entry_lock "$name"
       echo "ERROR: could not resolve the current reference primary branch for $name." >&2
@@ -1345,6 +1345,11 @@ bootstrap_workspace_validate_config() {
 
   if ! jq -e 'to_entries | all(.value | (.mode == "managed" or .mode == "reference"))' "$FORKS_DIR/config.json" >/dev/null 2>&1; then
     echo "ERROR: all forks/config.json entries must declare mode=managed or mode=reference." >&2
+    return 1
+  fi
+
+  if ! jq -e 'to_entries | all(.value | .mode != "reference" or (has("reference_branch") | not) or .reference_branch == "default" or .reference_branch == "newest")' "$FORKS_DIR/config.json" >/dev/null 2>&1; then
+    echo "ERROR: reference entries must set reference_branch to 'default' or 'newest' when present." >&2
     return 1
   fi
 
