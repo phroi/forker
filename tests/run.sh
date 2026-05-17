@@ -54,6 +54,20 @@ assert_equals() {
   [ "$actual" = "$expected" ] || fail "$message (expected '$expected', got '$actual')"
 }
 
+assert_config_missing() {
+  local repo="$1"
+  local key="$2"
+  local message="$3"
+  local output status
+
+  set +e
+  output=$(git -C "$repo" config --get "$key" 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -eq 1 ] || fail "$message (expected missing config key, git config status $status: $output)"
+}
+
 run_cmd() {
   set +e
   CMD_OUTPUT=$("$@" 2>&1)
@@ -749,8 +763,8 @@ assert_contains "$CMD_OUTPUT" 'wip matches pins' "state.sh should report the con
 run_cmd bash "$FORKER_ROOT/upstream-to-pins.sh" managed
 assert_status 0 "upstream-to-pins.sh should bootstrap a managed entry with no refs"
 assert_contains "$CMD_OUTPUT" 'Pins rebuilt in managed/pin/' "upstream-to-pins.sh should write managed pins"
-assert_equals "$(git -C "$FORKS_ROOT/managed/repo" config --get remote.origin.promisor || true)" '' "upstream-to-pins.sh should not leave managed clones as promisor clones"
-assert_equals "$(git -C "$FORKS_ROOT/managed/repo" config --get remote.origin.partialclonefilter || true)" '' "upstream-to-pins.sh should not leave managed clones with a partial clone filter"
+assert_config_missing "$FORKS_ROOT/managed/repo" remote.origin.promisor "upstream-to-pins.sh should not leave managed clones as promisor clones"
+assert_config_missing "$FORKS_ROOT/managed/repo" remote.origin.partialclonefilter "upstream-to-pins.sh should not leave managed clones with a partial clone filter"
 
 run_cmd bash "$FORKER_ROOT/upstream-to-pins.sh" merged
 assert_status 0 "upstream-to-pins.sh should bootstrap a disposable managed entry for conversion"
@@ -918,8 +932,8 @@ assert_status 0 "pins-to-wip.sh should rebuild a managed clone from pins"
 assert_contains "$CMD_OUTPUT" 'OK: wip HEAD matches pinned HEAD' "pins-to-wip.sh should verify the rebuilt HEAD"
 assert_contains "$(cat "$FORKS_ROOT/managed/repo/README.md")" 'saved series text' "pins-to-wip.sh should restore saved text changes"
 [ -f "$FORKS_ROOT/managed/repo/local.bin" ] || fail "pins-to-wip.sh should restore saved binary files"
-assert_equals "$(git -C "$FORKS_ROOT/managed/repo" config --get remote.origin.promisor || true)" '' "pins-to-wip.sh should not rebuild managed clones as promisor clones"
-assert_equals "$(git -C "$FORKS_ROOT/managed/repo" config --get remote.origin.partialclonefilter || true)" '' "pins-to-wip.sh should not rebuild managed clones with a partial clone filter"
+assert_config_missing "$FORKS_ROOT/managed/repo" remote.origin.promisor "pins-to-wip.sh should not rebuild managed clones as promisor clones"
+assert_config_missing "$FORKS_ROOT/managed/repo" remote.origin.partialclonefilter "pins-to-wip.sh should not rebuild managed clones with a partial clone filter"
 
 run_cmd bash "$FORKER_ROOT/pins-to-wip.sh" managed
 assert_status 1 "pins-to-wip.sh should refuse to overwrite an existing managed clone"
