@@ -56,13 +56,13 @@ entry_exists() {
 set_entry_mode_reference() {
   local name="$1"
 
-  jq --arg name "$name" '.[$name] |= (.mode = "reference" | del(.base_branch, .refs, .fork))' "$FORKS_DIR/config.json" | write_config_json
+  jq --arg name "$name" '.[$name] |= (.mode = "reference" | del(.base_branch, .refs, .fork, .reference_branch))' "$FORKS_DIR/config.json" | write_config_json
 }
 
 set_entry_mode_managed() {
   local name="$1" base_branch="$2"
 
-  jq --arg name "$name" --arg base_branch "$base_branch" '.[$name] |= (.mode = "managed" | .base_branch = $base_branch | .refs = (.refs // []))' "$FORKS_DIR/config.json" | write_config_json
+  jq --arg name "$name" --arg base_branch "$base_branch" '.[$name] |= (.mode = "managed" | .base_branch = $base_branch | .refs = (.refs // []) | del(.reference_branch))' "$FORKS_DIR/config.json" | write_config_json
 }
 
 delete_config_entry() {
@@ -289,6 +289,28 @@ repo_refs() {
 
 configured_base_branch() {
   config_val "$1" '.base_branch // empty'
+}
+
+reference_branch_policy() {
+  local name="$1"
+  local mode policy
+
+  mode=$(entry_mode "$name") || return 1
+  if [ "$mode" != "reference" ]; then
+    echo default
+    return 0
+  fi
+
+  policy=$(config_val "$name" 'if has("reference_branch") then .reference_branch else "default" end') || return 1
+  case "$policy" in
+    default|newest)
+      echo "$policy"
+      ;;
+    *)
+      echo "ERROR: $name reference_branch must be 'default' or 'newest', got '$policy'." >&2
+      return 1
+      ;;
+  esac
 }
 
 managed_requested_base_branch() {
@@ -613,7 +635,7 @@ reference_remote_head_branch() {
   ref_label "$ref"
 }
 
-reference_primary_branch() {
+newest_reference_branch() {
   local repo_dir="$1" default_branch="${2:-}"
   local branch timestamp newest_timestamp=""
   local -a newest_branches=()
@@ -645,20 +667,43 @@ reference_primary_branch() {
   echo "${newest_branches[0]}"
 }
 
+reference_primary_branch() {
+  local name="$1" repo_dir="$2" default_branch="${3:-}"
+  local policy
+
+  policy=$(reference_branch_policy "$name") || return 1
+  if [ "$policy" = "newest" ]; then
+    newest_reference_branch "$repo_dir" "$default_branch"
+    return
+  fi
+
+  if [ -z "$default_branch" ]; then
+    echo "ERROR: $name upstream default branch could not be resolved." >&2
+    return 1
+  fi
+
+  if ! git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/origin/$default_branch"; then
+    echo "ERROR: $name upstream default branch '$default_branch' was not fetched." >&2
+    return 1
+  fi
+
+  echo "$default_branch"
+}
+
 reference_primary_ref() {
-  local repo_dir="$1"
+  local name="$1" repo_dir="$2"
   local default_branch branch
 
   default_branch=$(reference_remote_head_branch "$repo_dir" 2>/dev/null || true)
-  branch=$(reference_primary_branch "$repo_dir" "$default_branch") || return 1
+  branch=$(reference_primary_branch "$name" "$repo_dir" "$default_branch") || return 1
   echo "origin/$branch"
 }
 
 reference_primary_sha() {
   local ref
 
-  ref=$(reference_primary_ref "$1") || return 1
-  git -C "$1" rev-parse "$ref"
+  ref=$(reference_primary_ref "$1" "$2") || return 1
+  git -C "$2" rev-parse "$ref"
 }
 
 ref_label() {

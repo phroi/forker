@@ -4,7 +4,7 @@ Forker manages reference clones and managed forks under `forks/<name>/{repo,pin}
 
 It manages:
 
-- `reference`: read-only upstream mirror that fetches all remote branches and checks out the newest mirrored branch
+- `reference`: read-only upstream mirror that fetches all remote branches and checks out the upstream default branch
 - `managed`: writable, reproducible fork whose authoritative state lives in `forks/<name>/pin/`
 
 Each entry root looks like:
@@ -40,7 +40,7 @@ Only `forks/<name>/{repo,pin}` is live state. `forks/.stage/` and `forks/.swap/`
 ## Rules That Matter
 
 - `rebuild-wip.sh` is the only public managed command that may replace an existing clone.
-- Reference clones are read-only between explicit mutation commands. `sync-reference.sh` may reset them to the newest mirrored upstream branch and relock them afterward.
+- Reference clones are read-only between explicit mutation commands. `sync-reference.sh` may reset them to the configured reference branch policy and relock them afterward.
 - `remove-reference.sh` only removes missing or clean reference entries. It refuses local reference drift and stash entries because deleting the clone would drop that git state.
 - A managed clone is safe to replace when it is missing, already matches pins, its saved series matches pins, or it is clean and exactly at upstream tip with no local-only commits.
 - `managed-to-reference.sh` only works for replaceable managed entries. It deletes `pin/` and rewrites the config entry to `mode=reference`.
@@ -55,6 +55,13 @@ Only `forks/<name>/{repo,pin}` is live state. `forks/.stage/` and `forks/.swap/`
 - Managed entries may set `base_branch` in `forks/config.json`.
 - Pin rebuilds start from `base_branch` when present, otherwise they fall back to the upstream default branch.
 - `refs` still means extra upstream branches or PR refs merged on top of `base_branch`.
+
+## Reference Branch
+
+- Reference entries may set `reference_branch` in `forks/config.json`.
+- Missing `reference_branch` or `"default"` checks out the upstream default branch while still fetching every upstream branch as `origin/*`.
+- `"newest"` keeps watcher behavior by checking out the newest mirrored upstream branch, preferring the upstream default branch only when it ties for newest.
+- `reference-to-managed.sh` records the selected reference branch as managed `base_branch` during conversion.
 
 ## Pin Model
 

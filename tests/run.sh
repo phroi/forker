@@ -200,7 +200,8 @@ cat > "$FORKS_ROOT/config.json" <<JSON
   },
   "convertible_reference": {
     "upstream": "file://$CONVERT_REF_BARE",
-    "mode": "reference"
+    "mode": "reference",
+    "reference_branch": "newest"
   }
 }
 JSON
@@ -470,6 +471,52 @@ assert_status 1 "bootstrap.sh should reject configs without explicit modes"
 assert_contains "$CMD_OUTPUT" 'all forks/config.json entries must declare mode=managed or mode=reference' "bootstrap.sh should explain invalid mode configuration"
 [ ! -d "$BOOTSTRAP_SHIM_INVALID_FORKS/.stage/bootstrap-phroi_forker" ] || fail "bootstrap.sh should clean its temporary bootstrap checkout on failure"
 
+BOOTSTRAP_SHIM_INVALID_REFERENCE_BRANCH_ROOT="$ROOT/bootstrap-shim-invalid-reference-branch"
+BOOTSTRAP_SHIM_INVALID_REFERENCE_BRANCH_FORKS="$BOOTSTRAP_SHIM_INVALID_REFERENCE_BRANCH_ROOT/forks"
+
+init_git_root "$BOOTSTRAP_SHIM_INVALID_REFERENCE_BRANCH_ROOT"
+mkdir -p "$BOOTSTRAP_SHIM_INVALID_REFERENCE_BRANCH_FORKS"
+cat > "$BOOTSTRAP_SHIM_INVALID_REFERENCE_BRANCH_FORKS/config.json" <<JSON
+{
+  "broken_reference": {
+    "upstream": "file://$BOOTSTRAP_SHIM_REF_BARE",
+    "mode": "reference",
+    "reference_branch": "latest"
+  }
+}
+JSON
+
+run_cmd env FORKER_BOOTSTRAP_UPSTREAM="file://$PHROI_FORKER_BARE" bash -c 'set -euo pipefail
+cd "$1"
+bash "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_INVALID_REFERENCE_BRANCH_ROOT" "$SOURCE_FORKER"
+assert_status 1 "bootstrap.sh should reject invalid reference_branch values"
+assert_contains "$CMD_OUTPUT" "reference entries must set reference_branch to 'default' or 'newest' when present" "bootstrap.sh should explain invalid reference_branch configuration"
+assert_equals "$(jq -r 'has("phroi_forker")' "$BOOTSTRAP_SHIM_INVALID_REFERENCE_BRANCH_FORKS/config.json")" 'false' "bootstrap.sh should reject invalid reference_branch before adding phroi_forker"
+if [ -d "$BOOTSTRAP_SHIM_INVALID_REFERENCE_BRANCH_FORKS/.stage/bootstrap-phroi_forker" ]; then
+  fail "bootstrap.sh should clean its temporary bootstrap checkout after invalid reference_branch failures"
+fi
+
+BOOTSTRAP_SHIM_FALSE_REFERENCE_BRANCH_ROOT="$ROOT/bootstrap-shim-false-reference-branch"
+BOOTSTRAP_SHIM_FALSE_REFERENCE_BRANCH_FORKS="$BOOTSTRAP_SHIM_FALSE_REFERENCE_BRANCH_ROOT/forks"
+
+init_git_root "$BOOTSTRAP_SHIM_FALSE_REFERENCE_BRANCH_ROOT"
+mkdir -p "$BOOTSTRAP_SHIM_FALSE_REFERENCE_BRANCH_FORKS"
+cat > "$BOOTSTRAP_SHIM_FALSE_REFERENCE_BRANCH_FORKS/config.json" <<JSON
+{
+  "broken_reference": {
+    "upstream": "file://$BOOTSTRAP_SHIM_REF_BARE",
+    "mode": "reference",
+    "reference_branch": false
+  }
+}
+JSON
+
+run_cmd env FORKER_BOOTSTRAP_UPSTREAM="file://$PHROI_FORKER_BARE" bash -c 'set -euo pipefail
+cd "$1"
+bash "$2/bootstrap.sh"' _ "$BOOTSTRAP_SHIM_FALSE_REFERENCE_BRANCH_ROOT" "$SOURCE_FORKER"
+assert_status 1 "bootstrap.sh should reject boolean reference_branch values"
+assert_contains "$CMD_OUTPUT" "reference entries must set reference_branch to 'default' or 'newest' when present" "bootstrap.sh should explain boolean reference_branch rejection"
+
 BOOTSTRAP_SHIM_ARRAY_ROOT="$ROOT/bootstrap-shim-array"
 BOOTSTRAP_SHIM_ARRAY_FORKS="$BOOTSTRAP_SHIM_ARRAY_ROOT/forks"
 
@@ -632,11 +679,12 @@ assert_contains "$CMD_OUTPUT" $'reference\tupdated\t' "sync-reference.sh should 
 run_cmd bash "$FORKER_ROOT/sync-reference.sh" branchy_reference
 assert_status 0 "sync-reference.sh should clone a multi-branch reference entry"
 assert_contains "$CMD_OUTPUT" $'branchy_reference\tcloned\t-\t' "sync-reference.sh should report a clone for multi-branch references"
-assert_equals "$(git -C "$FORKS_ROOT/branchy_reference/repo" branch --show-current)" 'dev' "sync-reference.sh should check out the newest mirrored branch"
+assert_equals "$(git -C "$FORKS_ROOT/branchy_reference/repo" branch --show-current)" 'main' "sync-reference.sh should check out the upstream default branch by default"
+git -C "$FORKS_ROOT/branchy_reference/repo" show-ref --verify --quiet refs/remotes/origin/dev || fail "sync-reference.sh should still fetch all branches for default-branch references"
 
 run_cmd bash "$FORKER_ROOT/state.sh" branchy_reference
 assert_status 0 "state.sh should accept a clean multi-branch reference clone"
-assert_contains "$CMD_OUTPUT" 'reference clone matches primary origin/dev' "state.sh should report the derived primary branch"
+assert_contains "$CMD_OUTPUT" 'reference clone matches primary origin/main' "state.sh should report the default primary branch"
 assert_contains "$CMD_OUTPUT" 'remote_head  origin/main' "state.sh should report the upstream remote HEAD separately"
 
 chmod -R u+w "$FORKS_ROOT/branchy_reference/repo"
@@ -658,9 +706,9 @@ assert_contains "$CMD_OUTPUT" $'branchy_reference\tupdated\t' "sync-reference.sh
 
 append_commit "$BRANCHY_REF_WORK" main README.md 'branchy main hotfix'
 run_cmd bash "$FORKER_ROOT/sync-reference.sh" branchy_reference
-assert_status 0 "sync-reference.sh should refresh the primary branch when another branch becomes newer"
-assert_contains "$CMD_OUTPUT" $'branchy_reference\tupdated\t' "sync-reference.sh should report primary branch changes"
-assert_equals "$(git -C "$FORKS_ROOT/branchy_reference/repo" branch --show-current)" 'main' "sync-reference.sh should switch to the newest mirrored branch"
+assert_status 0 "sync-reference.sh should refresh default-branch references"
+assert_contains "$CMD_OUTPUT" $'branchy_reference\tupdated\t' "sync-reference.sh should report default branch updates"
+assert_equals "$(git -C "$FORKS_ROOT/branchy_reference/repo" branch --show-current)" 'main' "sync-reference.sh should stay on the default branch"
 
 run_cmd bash "$FORKER_ROOT/state.sh" branchy_reference
 assert_status 0 "state.sh should accept a refreshed multi-branch reference clone"
@@ -668,7 +716,7 @@ assert_contains "$CMD_OUTPUT" 'reference clone matches primary origin/main' "sta
 
 run_cmd bash "$FORKER_ROOT/sync-reference.sh" convertible_reference
 assert_status 0 "sync-reference.sh should clone a convertible reference entry"
-assert_equals "$(git -C "$FORKS_ROOT/convertible_reference/repo" branch --show-current)" 'dev' "sync-reference.sh should start convertible references on their newest branch"
+assert_equals "$(git -C "$FORKS_ROOT/convertible_reference/repo" branch --show-current)" 'dev' "sync-reference.sh should honor reference_branch=newest"
 
 chmod -R u+w "$FORKS_ROOT/branchy_reference/repo"
 printf '%s\n' 'unsafe reference edit' >> "$FORKS_ROOT/branchy_reference/repo/README.md"
@@ -749,6 +797,7 @@ assert_contains "$CMD_OUTPUT" 'convertible_reference: converted to managed with 
 assert_equals "$(jq -r '.convertible_reference.mode' "$FORKS_ROOT/config.json")" 'managed' "reference-to-managed.sh should rewrite config mode"
 assert_equals "$(jq -r '.convertible_reference.base_branch' "$FORKS_ROOT/config.json")" 'dev' "reference-to-managed.sh should record the managed base branch"
 assert_equals "$(jq -c '.convertible_reference.refs' "$FORKS_ROOT/config.json")" '[]' "reference-to-managed.sh should not invent managed merge refs"
+assert_equals "$(jq -r '.convertible_reference | has("reference_branch")' "$FORKS_ROOT/config.json")" 'false' "reference-to-managed.sh should remove reference-only branch policy"
 [ -d "$FORKS_ROOT/convertible_reference/pin" ] || fail "reference-to-managed.sh should create pin state"
 assert_equals "$(git -C "$FORKS_ROOT/convertible_reference/repo" branch --show-current)" 'wip' "reference-to-managed.sh should leave a writable managed wip clone"
 [ -w "$FORKS_ROOT/convertible_reference/repo/README.md" ] || fail "reference-to-managed.sh should leave managed clones writable"
@@ -772,6 +821,7 @@ run_cmd bash "$FORKER_ROOT/managed-to-reference.sh" merged
 assert_status 0 "managed-to-reference.sh should convert a managed entry back to reference mode"
 assert_contains "$CMD_OUTPUT" 'merged: converted to reference at ' "managed-to-reference.sh should report the rebuilt reference clone"
 assert_equals "$(jq -r '.merged.mode' "$FORKS_ROOT/config.json")" 'reference' "managed-to-reference.sh should rewrite config mode"
+assert_equals "$(jq -r '.merged | has("reference_branch")' "$FORKS_ROOT/config.json")" 'false' "managed-to-reference.sh should leave ordinary references on implicit default policy"
 [ ! -d "$FORKS_ROOT/merged/pin" ] || fail "managed-to-reference.sh should remove managed pin state"
 assert_equals "$(git -C "$FORKS_ROOT/merged/repo" branch --show-current)" 'main' "managed-to-reference.sh should leave a reference clone on the default branch"
 assert_equals "$(git -C "$FORKS_ROOT/merged/repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}')" 'origin/main' "managed-to-reference.sh should track the upstream default branch"
@@ -781,6 +831,23 @@ run_cmd bash "$FORKER_ROOT/state.sh" merged
 assert_status 0 "state.sh should treat a converted entry as a clean reference clone"
 assert_contains "$CMD_OUTPUT" 'reference clone matches primary origin/main' "state.sh should report the converted entry as reference-clean"
 assert_contains "$CMD_OUTPUT" 'readonly     yes' "state.sh should report converted reference clones as read-only"
+
+create_branch_commit "$MERGED_WORK" main dev README.md 'merged dev watcher content'
+jq '.merged.reference_branch = "newest"' "$FORKS_ROOT/config.json" > "$tmp"
+mv "$tmp" "$FORKS_ROOT/config.json"
+run_cmd bash "$FORKER_ROOT/upstream-to-pins.sh" merged
+assert_status 1 "upstream-to-pins.sh should still reject entries converted back to reference mode"
+assert_contains "$CMD_OUTPUT" "Use 'bash forks/phroi_forker/repo/sync-reference.sh merged'." "reference entries with stale policy should still route to reference sync"
+
+jq '.merged.mode = "managed" | .merged.refs = [] | .merged.base_branch = "main" | .merged.reference_branch = "newest"' "$FORKS_ROOT/config.json" > "$tmp"
+mv "$tmp" "$FORKS_ROOT/config.json"
+run_cmd bash "$FORKER_ROOT/upstream-to-pins.sh" merged
+assert_status 0 "upstream-to-pins.sh should rebuild managed pins after manually restoring managed mode"
+run_cmd bash "$FORKER_ROOT/managed-to-reference.sh" merged
+assert_status 0 "managed-to-reference.sh should ignore stale managed reference_branch policy"
+assert_equals "$(jq -r '.merged | has("reference_branch")' "$FORKS_ROOT/config.json")" 'false' "managed-to-reference.sh should remove stale managed reference_branch policy"
+assert_equals "$(git -C "$FORKS_ROOT/merged/repo" branch --show-current)" 'main' "managed-to-reference.sh should use default policy despite stale managed reference_branch"
+assert_equals "$(git -C "$FORKS_ROOT/merged/repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}')" 'origin/main' "managed-to-reference.sh should track default branch despite stale managed reference_branch"
 
 run_cmd bash "$FORKER_ROOT/upstream-to-pins.sh" merged
 assert_status 1 "upstream-to-pins.sh should reject entries converted back to reference mode"
