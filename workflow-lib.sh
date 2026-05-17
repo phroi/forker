@@ -327,9 +327,9 @@ classify_and_generate_conflicts() {
   local strategies num strategy rest
   local -a need_generate=()
 
-  # Ask coworker for the cheapest valid strategy first, then generate only for
+  # Ask for the cheapest valid strategy first, then generate only for
   # conflicts that still need a custom merge.
-  strategies=$(render_conflict_input "$work" "${need_ref[@]}" | coworker_ask \
+  strategies=$(render_conflict_input "$work" "${need_ref[@]}" | forker_ask \
     "For each conflict, respond with ONLY the conflict number and one strategy per line:
 N OURS       - keep ours (theirs is outdated or superseded)
 N THEIRS     - keep theirs (ours is outdated or superseded)
@@ -370,7 +370,7 @@ No explanations.")
 
   [ ${#need_generate[@]} -eq 0 ] && return 0
 
-  render_conflict_input "$work" "${need_generate[@]}" | coworker_ask \
+  render_conflict_input "$work" "${need_generate[@]}" | forker_ask \
     "Merge each conflict meaningfully. Output '=== RESOLUTION N ===' header followed by ONLY the merged code. No explanations, no code fences." | awk -v dir="$work" '
   # Buffer blank lines so generated resolutions keep their exact trailing shape.
   /^=== RESOLUTION [0-9]+ ===$/ {
@@ -497,7 +497,7 @@ derive_bootstrap_save_base() {
 resolve_conflict() {
   local file="$1" rel_path="$2" old_res="${3:-}"
   local count work i ours base theirs
-  local -a sha=() need_coworker=()
+  local -a sha=() need_ask=()
 
   count=$(awk 'substr($0,1,7)=="<<<<<<<"{n++} END{print n+0}' "$file")
   [ "$count" -gt 0 ] || { echo "ERROR: no conflict markers in $file" >&2; return 1; }
@@ -536,7 +536,7 @@ resolve_conflict() {
       cp "$ours" "$work/r$i"
       echo "  conflict $i: deterministic (sides identical)" >&2
     else
-      need_coworker+=("$i")
+      need_ask+=("$i")
     fi
   done
 
@@ -564,10 +564,10 @@ resolve_conflict() {
     ' "$old_res"
   fi
 
-  [ ${#need_coworker[@]} -eq 0 ] && { finish_conflict_resolution "$file" "$work" "$count" sha; return; }
-  reuse_saved_conflict_resolutions "$work" sha need_coworker
-  [ ${#need_coworker[@]} -eq 0 ] && { finish_conflict_resolution "$file" "$work" "$count" sha; return; }
-  classify_and_generate_conflicts "$work" need_coworker
+  [ ${#need_ask[@]} -eq 0 ] && { finish_conflict_resolution "$file" "$work" "$count" sha; return; }
+  reuse_saved_conflict_resolutions "$work" sha need_ask
+  [ ${#need_ask[@]} -eq 0 ] && { finish_conflict_resolution "$file" "$work" "$count" sha; return; }
+  classify_and_generate_conflicts "$work" need_ask
   finish_conflict_resolution "$file" "$work" "$count" sha
 }
 
@@ -578,7 +578,7 @@ build_upstream_to_pins_staging() {
   local upstream real_pin base_sha
   local merge_idx merge_ref merge_sha merge_msg old_merge_res=""
   local local_base_sha head_sha fork_remote resolution_count local_series_count
-  local -a refs=() conflicted=() pids=()
+  local -a refs=() conflicted=()
 
   # Build in staging first; swap only after success.
   real_pin=$(live_pin_dir "$name")
@@ -644,22 +644,16 @@ build_upstream_to_pins_staging() {
         old_merge_res="$real_pin/res-${merge_idx}.resolution"
       fi
 
-      pids=()
       for file in "${conflicted[@]}"; do
-        resolve_conflict "$output_repo/$file" "$file" "$old_merge_res" > "$output_repo/${file}.resolved" &
-        pids+=($!)
-      done
-
-      for i in "${!pids[@]}"; do
-        if ! wait "${pids[$i]}"; then
-          echo "ERROR: coworker failed for ${conflicted[$i]}" >&2
+        if ! resolve_conflict "$output_repo/$file" "$file" "$old_merge_res" > "$output_repo/${file}.resolved"; then
+          echo "ERROR: FORKER_ASK failed for $file" >&2
           return 1
         fi
       done
 
       for file in "${conflicted[@]}"; do
         if [ ! -s "$output_repo/${file}.resolved" ]; then
-          echo "ERROR: coworker returned empty resolution for $file" >&2
+          echo "ERROR: FORKER_ASK returned empty resolution for $file" >&2
           return 1
         fi
         if grep -q '<<<<<<<' "$output_repo/${file}.resolved"; then
@@ -1807,10 +1801,14 @@ health_workflow() {
   health_tool git missing
   health_tool jq missing
 
-  if command -v pnpm >/dev/null 2>&1; then
-    health_ok tool pnpm available
+  if [ -n "${FORKER_ASK:-}" ]; then
+    if command -v "$FORKER_ASK" >/dev/null 2>&1; then
+      health_ok tool FORKER_ASK available
+    else
+      health_error tool FORKER_ASK missing
+    fi
   else
-    health_ok tool pnpm optional-for-conflicts-only
+    health_ok tool FORKER_ASK optional-for-conflicts-only
   fi
 
   if supports_mv_exchange; then
