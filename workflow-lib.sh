@@ -598,19 +598,21 @@ build_upstream_to_pins_staging() {
   rm -rf "$output_repo" "$output_pin"
   mkdir -p "$output_pin"
 
-  git clone --filter=blob:none "$upstream" "$output_repo"
+  # Managed replays need historical blobs during merges and conflict reconstruction;
+  # GitHub partial-clone promisors can reject those lazy fetches.
+  git clone "$upstream" "$output_repo" || return 1
 
-  git -C "$output_repo" config merge.conflictStyle diff3
-  git -C "$output_repo" config core.abbrev 40
+  git -C "$output_repo" config merge.conflictStyle diff3 || return 1
+  git -C "$output_repo" config core.abbrev 40 || return 1
 
   if ! git -C "$output_repo" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
     echo "ERROR: base branch '$base_branch' is not available from upstream." >&2
     return 1
   fi
 
-  git -C "$output_repo" checkout -B "$base_branch" "origin/$base_branch"
-  base_sha=$(git -C "$output_repo" rev-parse HEAD)
-  git -C "$output_repo" checkout -b wip
+  git -C "$output_repo" checkout -B "$base_branch" "origin/$base_branch" || return 1
+  base_sha=$(git -C "$output_repo" rev-parse HEAD) || return 1
+  git -C "$output_repo" checkout -b wip || return 1
 
   printf '%s\t%s\n' "$base_sha" "$base_branch" > "$output_pin/manifest"
 
@@ -735,13 +737,15 @@ build_pins_to_wip_staging() {
   rm -rf "$output_repo"
 
   base_sha=$(head -1 "$manifest" | cut -d$'\t' -f1)
-  git clone --filter=blob:none "$upstream" "$output_repo"
+  # Managed replays need historical blobs during merges and conflict reconstruction;
+  # GitHub partial-clone promisors can reject those lazy fetches.
+  git clone "$upstream" "$output_repo" || return 1
 
-  git -C "$output_repo" config merge.conflictStyle diff3
-  git -C "$output_repo" config core.abbrev 40
+  git -C "$output_repo" config merge.conflictStyle diff3 || return 1
+  git -C "$output_repo" config core.abbrev 40 || return 1
 
-  git -C "$output_repo" checkout "$base_sha"
-  git -C "$output_repo" checkout -b wip
+  git -C "$output_repo" checkout "$base_sha" || return 1
+  git -C "$output_repo" checkout -b wip || return 1
 
   merge_idx=0
   while IFS=$'\t' read -r sha ref_name; do
