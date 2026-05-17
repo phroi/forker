@@ -600,7 +600,7 @@ build_upstream_to_pins_staging() {
 
   # Managed replays need historical blobs during merges and conflict reconstruction;
   # GitHub partial-clone promisors can reject those lazy fetches.
-  git clone "$upstream" "$output_repo"
+  git clone "$upstream" "$output_repo" || return 1
 
   git -C "$output_repo" config merge.conflictStyle diff3
   git -C "$output_repo" config core.abbrev 40
@@ -739,7 +739,7 @@ build_pins_to_wip_staging() {
   base_sha=$(head -1 "$manifest" | cut -d$'\t' -f1)
   # Managed replays need historical blobs during merges and conflict reconstruction;
   # GitHub partial-clone promisors can reject those lazy fetches.
-  git clone "$upstream" "$output_repo"
+  git clone "$upstream" "$output_repo" || return 1
 
   git -C "$output_repo" config merge.conflictStyle diff3
   git -C "$output_repo" config core.abbrev 40
