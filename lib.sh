@@ -273,12 +273,12 @@ upstream_url() {
 }
 
 forker_ask() {
-  if [ -z "${FORKER_ASK:-}" ] || ! command -v "$FORKER_ASK" >/dev/null; then
-    echo "ERROR: set FORKER_ASK to an executable that resolves conflicts." >&2
+  if [ -z "${COWORKER_PLAN:-}" ] || ! command -v "$COWORKER_PLAN" >/dev/null; then
+    echo "ERROR: set COWORKER_PLAN to an executable that resolves conflicts." >&2
     return 127
   fi
 
-  "$FORKER_ASK" "$@"
+  "$COWORKER_PLAN" "$@"
 }
 
 fork_url() {

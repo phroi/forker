@@ -84,6 +84,6 @@ forks/<name>/pin/
 ## Notes
 
 - `bootstrap.sh` requires `git` and `jq`. It creates `forks/` when missing, ensures `forks/.gitignore`, fetches a temporary latest `phroi_forker` checkout, then delegates to `materialize-workspace.sh`.
-- Conflicted record/bootstrap paths require `FORKER_ASK`, an executable that reads conflict context from stdin, receives the prompt as arguments, and writes the answer to stdout.
+- Conflicted record/bootstrap paths require `COWORKER_PLAN`, an executable that reads conflict context from stdin, receives the prompt as arguments, and writes the answer to stdout.
 - Replay and verify reuse recorded `res-N.resolution` data.
 - If a recorded merge SHA can no longer be fetched from upstream, rerun `rebuild-pins.sh`.
