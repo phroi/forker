@@ -612,16 +612,16 @@ chmod +x "$ASK_PROVIDER"
 run_cmd bash -c 'set -euo pipefail
 source "$1/lib.sh"
 forker_ask prompt' _ "$FORKER_ROOT"
-assert_status 127 "forker_ask should require FORKER_ASK"
-assert_contains "$CMD_OUTPUT" 'set FORKER_ASK' "forker_ask should explain the required command"
+assert_status 127 "forker_ask should require COWORKER_PLAN"
+assert_contains "$CMD_OUTPUT" 'set COWORKER_PLAN' "forker_ask should explain the required command"
 
-run_cmd env FORKER_ASK="$ROOT/missing-ask" bash -c 'set -euo pipefail
+run_cmd env COWORKER_PLAN="$ROOT/missing-ask" bash -c 'set -euo pipefail
 source "$1/lib.sh"
 forker_ask prompt' _ "$FORKER_ROOT"
-assert_status 127 "forker_ask should reject a missing FORKER_ASK command"
-assert_contains "$CMD_OUTPUT" 'set FORKER_ASK' "forker_ask should explain a missing command"
+assert_status 127 "forker_ask should reject a missing COWORKER_PLAN command"
+assert_contains "$CMD_OUTPUT" 'set COWORKER_PLAN' "forker_ask should explain a missing command"
 
-run_cmd env FORKER_ASK="$ASK_PROVIDER" FORKER_TEST_ASK_MODE=fail bash -c 'set -euo pipefail
+run_cmd env COWORKER_PLAN="$ASK_PROVIDER" FORKER_TEST_ASK_MODE=fail bash -c 'set -euo pipefail
 source "$1/lib.sh"
 source "$1/workflow-lib.sh"
 file=$(mktemp)
@@ -635,10 +635,10 @@ file=$(mktemp)
   printf "%s\n" ">>>>>>> theirs"
 } > "$file"
 resolve_conflict "$file" sample.txt > "$file.resolved"' bash "$FORKER_ROOT"
-assert_status 1 "resolve_conflict should propagate FORKER_ASK failures"
+assert_status 1 "resolve_conflict should propagate COWORKER_PLAN failures"
 assert_contains "$CMD_OUTPUT" 'unknown FORKER_TEST_ASK_MODE' "resolve_conflict should preserve provider failure output"
 
-run_cmd env FORKER_ASK="$ASK_PROVIDER" FORKER_TEST_ASK_MODE=trailing-blank-lines bash -c 'set -euo pipefail
+run_cmd env COWORKER_PLAN="$ASK_PROVIDER" FORKER_TEST_ASK_MODE=trailing-blank-lines bash -c 'set -euo pipefail
 source "$1/lib.sh"
 source "$1/workflow-lib.sh"
 file=$(mktemp)
@@ -659,7 +659,7 @@ cmp -s "$actual" "$expected"
 grep -q "resolution=2" "$file.resolution"' bash "$FORKER_ROOT"
 assert_status 0 "resolve_conflict should preserve generated trailing blank lines in recorded resolutions"
 
-run_cmd env FORKER_ASK="$ASK_PROVIDER" FORKER_TEST_ASK_MODE=no-final-newline bash -c 'set -euo pipefail
+run_cmd env COWORKER_PLAN="$ASK_PROVIDER" FORKER_TEST_ASK_MODE=no-final-newline bash -c 'set -euo pipefail
 source "$1/lib.sh"
 source "$1/workflow-lib.sh"
 file=$(mktemp)
@@ -1103,15 +1103,15 @@ ln -s "$(command -v dirname)" "$FAKEBIN/dirname"
 run_cmd env PATH="$FAKEBIN" /bin/bash "$FORKER_ROOT/health.sh"
 assert_status 0 "health.sh should not require pnpm"
 [[ "$CMD_OUTPUT" != *pnpm* ]] || fail "health.sh should not mention pnpm"
-assert_contains "$CMD_OUTPUT" $'OK\ttool\tFORKER_ASK\toptional-for-conflicts-only' "health.sh should report missing FORKER_ASK as optional"
+assert_contains "$CMD_OUTPUT" $'OK\ttool\tCOWORKER_PLAN\toptional-for-conflicts-only' "health.sh should report missing COWORKER_PLAN as optional"
 
-run_cmd env FORKER_ASK="$ASK_PROVIDER" bash "$FORKER_ROOT/health.sh"
-assert_status 0 "health.sh should accept a configured FORKER_ASK"
-assert_contains "$CMD_OUTPUT" $'OK\ttool\tFORKER_ASK\tavailable' "health.sh should report configured FORKER_ASK"
+run_cmd env COWORKER_PLAN="$ASK_PROVIDER" bash "$FORKER_ROOT/health.sh"
+assert_status 0 "health.sh should accept a configured COWORKER_PLAN"
+assert_contains "$CMD_OUTPUT" $'OK\ttool\tCOWORKER_PLAN\tavailable' "health.sh should report configured COWORKER_PLAN"
 
-run_cmd env FORKER_ASK="$ROOT/missing-ask" bash "$FORKER_ROOT/health.sh"
-assert_status 1 "health.sh should reject a configured missing FORKER_ASK"
-assert_contains "$CMD_OUTPUT" $'ERROR\ttool\tFORKER_ASK\tmissing' "health.sh should report missing configured FORKER_ASK"
+run_cmd env COWORKER_PLAN="$ROOT/missing-ask" bash "$FORKER_ROOT/health.sh"
+assert_status 1 "health.sh should reject a configured missing COWORKER_PLAN"
+assert_contains "$CMD_OUTPUT" $'ERROR\ttool\tCOWORKER_PLAN\tmissing' "health.sh should report missing configured COWORKER_PLAN"
 
 run_cmd bash "$FORKER_ROOT/health.sh"
 assert_status 0 "health.sh should still succeed after workflow operations"

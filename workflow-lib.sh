@@ -646,14 +646,14 @@ build_upstream_to_pins_staging() {
 
       for file in "${conflicted[@]}"; do
         if ! resolve_conflict "$output_repo/$file" "$file" "$old_merge_res" > "$output_repo/${file}.resolved"; then
-          echo "ERROR: FORKER_ASK failed for $file" >&2
+          echo "ERROR: COWORKER_PLAN failed for $file" >&2
           return 1
         fi
       done
 
       for file in "${conflicted[@]}"; do
         if [ ! -s "$output_repo/${file}.resolved" ]; then
-          echo "ERROR: FORKER_ASK returned empty resolution for $file" >&2
+          echo "ERROR: COWORKER_PLAN returned empty resolution for $file" >&2
           return 1
         fi
         if grep -q '<<<<<<<' "$output_repo/${file}.resolved"; then
@@ -1801,14 +1801,14 @@ health_workflow() {
   health_tool git missing
   health_tool jq missing
 
-  if [ -n "${FORKER_ASK:-}" ]; then
-    if command -v "$FORKER_ASK" >/dev/null 2>&1; then
-      health_ok tool FORKER_ASK available
+  if [ -n "${COWORKER_PLAN:-}" ]; then
+    if command -v "$COWORKER_PLAN" >/dev/null 2>&1; then
+      health_ok tool COWORKER_PLAN available
     else
-      health_error tool FORKER_ASK missing
+      health_error tool COWORKER_PLAN missing
     fi
   else
-    health_ok tool FORKER_ASK optional-for-conflicts-only
+    health_ok tool COWORKER_PLAN optional-for-conflicts-only
   fi
 
   if supports_mv_exchange; then
